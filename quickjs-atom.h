@@ -169,14 +169,12 @@ DEF(groups, "groups")
 DEF(status, "status")
 DEF(reason, "reason")
 DEF(globalThis, "globalThis")
-#ifdef CONFIG_BIGNUM
 DEF(bigint, "bigint")
 DEF(bigfloat, "bigfloat")
 DEF(bigdecimal, "bigdecimal")
 DEF(roundingMode, "roundingMode")
 DEF(maximumSignificantDigits, "maximumSignificantDigits")
 DEF(maximumFractionDigits, "maximumFractionDigits")
-#endif
 #ifdef CONFIG_ATOMICS
 DEF(not_equal, "not-equal")
 DEF(timed_out, "timed-out")
@@ -209,21 +207,17 @@ DEF(Int16Array, "Int16Array")
 DEF(Uint16Array, "Uint16Array")
 DEF(Int32Array, "Int32Array")
 DEF(Uint32Array, "Uint32Array")
-#ifdef CONFIG_BIGNUM
 DEF(BigInt64Array, "BigInt64Array")
 DEF(BigUint64Array, "BigUint64Array")
-#endif
 DEF(Float32Array, "Float32Array")
 DEF(Float64Array, "Float64Array")
 DEF(DataView, "DataView")
-#ifdef CONFIG_BIGNUM
 DEF(BigInt, "BigInt")
 DEF(BigFloat, "BigFloat")
 DEF(BigFloatEnv, "BigFloatEnv")
 DEF(BigDecimal, "BigDecimal")
 DEF(OperatorSet, "OperatorSet")
 DEF(Operators, "Operators")
-#endif
 DEF(Map, "Map")
 DEF(Set, "Set") /* Map + 1 */
 DEF(WeakMap, "WeakMap") /* Map + 2 */
@@ -266,8 +260,6 @@ DEF(Symbol_hasInstance, "Symbol.hasInstance")
 DEF(Symbol_species, "Symbol.species")
 DEF(Symbol_unscopables, "Symbol.unscopables")
 DEF(Symbol_asyncIterator, "Symbol.asyncIterator")
-#ifdef CONFIG_BIGNUM
 DEF(Symbol_operatorSet, "Symbol.operatorSet")
-#endif
-    
+
 #endif /* DEF */
