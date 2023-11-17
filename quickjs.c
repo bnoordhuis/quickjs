@@ -70,6 +70,34 @@
 #define CONFIG_STACK_CHECK
 #endif
 
+uint64_t inc_ref_count, dec_ref_count, op_count;
+uint64_t ref_count_buckets[9];
+uint64_t op_count_buckets[9];
+
+static void record_ref_count(void)
+{
+    uint64_t total = inc_ref_count + dec_ref_count;
+    inc_ref_count = dec_ref_count = 0;
+    if (total < 1) ref_count_buckets[0]++;
+    else if (total < 2) ref_count_buckets[1]++;
+    else if (total < 4) ref_count_buckets[2]++;
+    else if (total < 8) ref_count_buckets[3]++;
+    else if (total < 16) ref_count_buckets[4]++;
+    else if (total < 32) ref_count_buckets[5]++;
+    else if (total < 64) ref_count_buckets[6]++;
+    else if (total < 128) ref_count_buckets[7]++;
+    else ref_count_buckets[8]++;
+    if (op_count < 1) op_count_buckets[0]++;
+    else if (op_count < 2) op_count_buckets[1]++;
+    else if (op_count < 4) op_count_buckets[2]++;
+    else if (op_count < 8) op_count_buckets[3]++;
+    else if (op_count < 16) op_count_buckets[4]++;
+    else if (op_count < 32) op_count_buckets[5]++;
+    else if (op_count < 64) op_count_buckets[6]++;
+    else if (op_count < 128) op_count_buckets[7]++;
+    else op_count_buckets[8]++;
+    op_count = 0;
+}
 
 /* dump object free */
 //#define DUMP_FREE
@@ -1725,6 +1753,7 @@ static JSString *js_alloc_string(JSContext *ctx, int max_len, int is_wide_char)
 /* same as JS_FreeValueRT() but faster */
 static inline void js_free_string(JSRuntime *rt, JSString *str)
 {
+    extern uint64_t dec_ref_count; dec_ref_count++;
     if (--str->header.ref_count <= 0) {
         if (str->atom_type) {
             JS_FreeAtomStruct(rt, str);
@@ -2420,6 +2449,7 @@ static JSAtom JS_DupAtomRT(JSRuntime *rt, JSAtom v)
     JSAtomStruct *p;
 
     if (!__JS_AtomIsConst(v)) {
+        extern uint64_t inc_ref_count; inc_ref_count++;
         p = rt->atom_array[v];
         p->header.ref_count++;
     }
@@ -2432,6 +2462,7 @@ JSAtom JS_DupAtom(JSContext *ctx, JSAtom v)
     JSAtomStruct *p;
 
     if (!__JS_AtomIsConst(v)) {
+        extern uint64_t inc_ref_count; inc_ref_count++;
         rt = ctx->rt;
         p = rt->atom_array[v];
         p->header.ref_count++;
@@ -2506,8 +2537,10 @@ static JSAtom __JS_NewAtom(JSRuntime *rt, JSString *str, int atom_type)
             /* str is the atom, return its index */
             i = js_get_atom_index(rt, str);
             /* reduce string refcount and increase atom's unless constant */
-            if (__JS_AtomIsConst(i))
+            if (__JS_AtomIsConst(i)) {
+                extern uint64_t dec_ref_count; dec_ref_count++;
                 str->header.ref_count--;
+            }
             return i;
         }
         /* try and locate an already registered atom */
@@ -2522,8 +2555,10 @@ static JSAtom __JS_NewAtom(JSRuntime *rt, JSString *str, int atom_type)
                 p->atom_type == atom_type &&
                 p->len == len &&
                 js_string_memcmp(p, str, len) == 0) {
-                if (!__JS_AtomIsConst(i))
+                if (!__JS_AtomIsConst(i)) {
+                    extern uint64_t inc_ref_count; inc_ref_count++;
                     p->header.ref_count++;
+                }
                 goto done;
             }
             i = p->hash_next;
@@ -2677,8 +2712,10 @@ static JSAtom __JS_FindAtom(JSRuntime *rt, const char *str, size_t len,
             p->len == len &&
             p->is_wide_char == 0 &&
             memcmp(p->u.str8, str, len) == 0) {
-            if (!__JS_AtomIsConst(i))
+            if (!__JS_AtomIsConst(i)) {
+                extern uint64_t inc_ref_count; inc_ref_count++;
                 p->header.ref_count++;
+            }
             return i;
         }
         i = p->hash_next;
@@ -4213,6 +4250,7 @@ static JSShape *js_clone_shape(JSContext *ctx, JSShape *sh1)
 
 static JSShape *js_dup_shape(JSShape *sh)
 {
+    extern uint64_t inc_ref_count; inc_ref_count++;
     sh->header.ref_count++;
     return sh;
 }
@@ -4239,6 +4277,7 @@ static void js_free_shape0(JSRuntime *rt, JSShape *sh)
 
 static void js_free_shape(JSRuntime *rt, JSShape *sh)
 {
+    extern uint64_t dec_ref_count; dec_ref_count++;
     if (unlikely(--sh->header.ref_count <= 0)) {
         js_free_shape0(rt, sh);
     }
@@ -5004,6 +5043,7 @@ static void set_cycle_flag(JSContext *ctx, JSValueConst obj)
 static void free_var_ref(JSRuntime *rt, JSVarRef *var_ref)
 {
     if (var_ref) {
+        extern uint64_t dec_ref_count; dec_ref_count++;
         assert(var_ref->header.ref_count > 0);
         if (--var_ref->header.ref_count == 0) {
             if (var_ref->is_detached) {
@@ -5438,6 +5478,7 @@ static void mark_children(JSRuntime *rt, JSGCObjectHeader *gp,
 
 static void gc_decref_child(JSRuntime *rt, JSGCObjectHeader *p)
 {
+    extern uint64_t dec_ref_count; dec_ref_count++;
     assert(p->ref_count > 0);
     p->ref_count--;
     if (p->ref_count == 0 && p->mark == 1) {
@@ -5470,6 +5511,7 @@ static void gc_decref(JSRuntime *rt)
 
 static void gc_scan_incref_child(JSRuntime *rt, JSGCObjectHeader *p)
 {
+    extern uint64_t inc_ref_count; inc_ref_count++;
     p->ref_count++;
     if (p->ref_count == 1) {
         /* ref_count was 0: remove from tmp_obj_list and add at the
@@ -5482,6 +5524,7 @@ static void gc_scan_incref_child(JSRuntime *rt, JSGCObjectHeader *p)
 
 static void gc_scan_incref_child2(JSRuntime *rt, JSGCObjectHeader *p)
 {
+    extern uint64_t inc_ref_count; inc_ref_count++;
     p->ref_count++;
 }
 
@@ -13682,6 +13725,7 @@ static JSVarRef *get_var_ref(JSContext *ctx, JSStackFrame *sf,
     list_for_each(el, &sf->var_ref_list) {
         var_ref = list_entry(el, JSVarRef, header.link);
         if (var_ref->var_idx == var_idx && var_ref->is_arg == is_arg) {
+            extern uint64_t inc_ref_count; inc_ref_count++;
             var_ref->header.ref_count++;
             return var_ref;
         }
@@ -13730,6 +13774,7 @@ static JSValue js_closure2(JSContext *ctx, JSValue func_obj,
                 if (!var_ref)
                     goto fail;
             } else {
+                extern uint64_t inc_ref_count; inc_ref_count++;
                 var_ref = cur_var_refs[cv->var_idx];
                 var_ref->header.ref_count++;
             }
@@ -14171,7 +14216,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
 #include "quickjs-opcode.h"
         [ OP_COUNT ... 255 ] = &&case_default
     };
-#define SWITCH(pc)      goto *dispatch_table[opcode = *pc++];
+#define SWITCH(pc)      op_count++; goto *dispatch_table[opcode = *pc++];
 #define CASE(op)        case_ ## op
 #define DEFAULT         case_default
 #define BREAK           SWITCH(pc)
@@ -14580,6 +14625,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             has_call_argc:
                 call_argv = sp - call_argc;
                 sf->cur_pc = pc;
+                record_ref_count();
                 ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
                                           JS_UNDEFINED, call_argc, call_argv, 0);
                 if (unlikely(JS_IsException(ret_val)))
@@ -15174,6 +15220,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 if (unlikely(JS_IsException(sp[-1])))
                     goto exception;
                 if (opcode == OP_make_var_ref_ref) {
+                    extern uint64_t inc_ref_count; inc_ref_count++;
                     var_ref = var_refs[idx];
                     var_ref->header.ref_count++;
                 } else {
@@ -15205,16 +15252,19 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
 
         CASE(OP_goto):
             pc += (int32_t)get_u32(pc);
+            record_ref_count();
             if (unlikely(js_poll_interrupts(ctx)))
                 goto exception;
             BREAK;
         CASE(OP_goto16):
             pc += (int16_t)get_u16(pc);
+            record_ref_count();
             if (unlikely(js_poll_interrupts(ctx)))
                 goto exception;
             BREAK;
         CASE(OP_goto8):
             pc += (int8_t)pc[0];
+            record_ref_count();
             if (unlikely(js_poll_interrupts(ctx)))
                 goto exception;
             BREAK;
@@ -15234,6 +15284,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 if (res) {
                     pc += (int32_t)get_u32(pc - 4) - 4;
                 }
+                record_ref_count();
                 if (unlikely(js_poll_interrupts(ctx)))
                     goto exception;
             }
@@ -15254,6 +15305,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 if (!res) {
                     pc += (int32_t)get_u32(pc - 4) - 4;
                 }
+                record_ref_count();
                 if (unlikely(js_poll_interrupts(ctx)))
                     goto exception;
             }
@@ -15274,6 +15326,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 if (res) {
                     pc += (int8_t)pc[-1] - 1;
                 }
+                record_ref_count();
                 if (unlikely(js_poll_interrupts(ctx)))
                     goto exception;
             }
@@ -15294,6 +15347,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 if (!res) {
                     pc += (int8_t)pc[-1] - 1;
                 }
+                record_ref_count();
                 if (unlikely(js_poll_interrupts(ctx)))
                     goto exception;
             }
@@ -17060,6 +17114,7 @@ static void js_async_function_free0(JSRuntime *rt, JSAsyncFunctionData *s)
 
 static void js_async_function_free(JSRuntime *rt, JSAsyncFunctionData *s)
 {
+    extern uint64_t dec_ref_count; dec_ref_count++;
     if (--s->header.ref_count == 0) {
         js_async_function_free0(rt, s);
     }
@@ -17101,6 +17156,7 @@ static int js_async_function_resolve_create(JSContext *ctx,
             return -1;
         }
         p = JS_VALUE_GET_OBJ(resolving_funcs[i]);
+        extern uint64_t inc_ref_count; inc_ref_count++;
         s->header.ref_count++;
         p->u.async_function_data = s;
     }
@@ -25449,6 +25505,7 @@ static JSValue js_build_module_ns(JSContext *ctx, JSModuleDef *m)
                                   JS_PROP_VARREF);
                 if (!pr)
                     goto fail;
+                extern uint64_t inc_ref_count; inc_ref_count++;
                 var_ref->header.ref_count++;
                 pr->u.var_ref = var_ref;
             }
@@ -25559,6 +25616,7 @@ static int js_create_module_bytecode_function(JSContext *ctx, JSModuleDef *m)
 
     p = JS_VALUE_GET_OBJ(func_obj);
     p->u.func.function_bytecode = b;
+    extern uint64_t inc_ref_count; inc_ref_count++;
     b->header.ref_count++;
     p->u.func.home_object = NULL;
     p->u.func.var_refs = NULL;
@@ -25757,6 +25815,7 @@ static int js_link_module(JSContext *ctx, JSModuleDef *m)
                         p1 = JS_VALUE_GET_OBJ(res_m->func_obj);
                         var_ref = p1->u.func.var_refs[res_me->u.local.var_idx];
                     }
+                    extern uint64_t inc_ref_count; inc_ref_count++;
                     var_ref->header.ref_count++;
                     var_refs[mi->var_idx] = var_ref;
 #ifdef DUMP_MODULE_RESOLVE
@@ -25772,6 +25831,7 @@ static int js_link_module(JSContext *ctx, JSModuleDef *m)
         for(i = 0; i < m->export_entries_count; i++) {
             JSExportEntry *me = &m->export_entries[i];
             if (me->export_type == JS_EXPORT_TYPE_LOCAL) {
+                extern uint64_t inc_ref_count; inc_ref_count++;
                 var_ref = var_refs[me->u.local.var_idx];
                 var_ref->header.ref_count++;
                 me->u.local.var_ref = var_ref;
@@ -43718,6 +43778,7 @@ static void map_delete_record(JSRuntime *rt, JSMapState *s, JSMapRecord *mr)
         JS_FreeValueRT(rt, mr->key);
     }
     JS_FreeValueRT(rt, mr->value);
+    extern uint64_t dec_ref_count; dec_ref_count++;
     if (--mr->ref_count == 0) {
         list_del(&mr->link);
         js_free_rt(rt, mr);
@@ -43732,6 +43793,7 @@ static void map_delete_record(JSRuntime *rt, JSMapState *s, JSMapRecord *mr)
 
 static void map_decref_record(JSRuntime *rt, JSMapRecord *mr)
 {
+    extern uint64_t dec_ref_count; dec_ref_count++;
     if (--mr->ref_count == 0) {
         /* the record can be safely removed */
         assert(mr->empty);
@@ -43906,6 +43968,7 @@ static JSValue js_map_forEach(JSContext *ctx, JSValueConst this_val,
     while (el != &s->records) {
         mr = list_entry(el, JSMapRecord, link);
         if (!mr->empty) {
+            extern uint64_t inc_ref_count; inc_ref_count++;
             mr->ref_count++;
             /* must duplicate in case the record is deleted */
             args[1] = JS_DupValue(ctx, mr->key);
@@ -44088,6 +44151,7 @@ static JSValue js_map_iterator_next(JSContext *ctx, JSValueConst this_val,
     }
 
     /* lock the record so that it won't be freed */
+    extern uint64_t inc_ref_count; inc_ref_count++;
     mr->ref_count++;
     it->cur_record = mr;
     *pdone = FALSE;
@@ -44401,6 +44465,7 @@ static JSValue js_promise_resolve_thenable_job(JSContext *ctx,
 static void js_promise_resolve_function_free_resolved(JSRuntime *rt,
                                                       JSPromiseFunctionDataResolved *sr)
 {
+    extern uint64_t dec_ref_count; dec_ref_count++;
     if (--sr->ref_count == 0) {
         js_free_rt(rt, sr);
     }
@@ -44437,6 +44502,7 @@ static int js_create_resolving_functions(JSContext *ctx,
             ret = -1;
             break;
         }
+        extern uint64_t inc_ref_count; inc_ref_count++;
         sr->ref_count++;
         s->presolved = sr;
         s->promise = JS_DupValue(ctx, promise);

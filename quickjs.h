@@ -600,6 +600,7 @@ static inline void JS_FreeValue(JSContext *ctx, JSValue v)
 {
     if (JS_VALUE_HAS_REF_COUNT(v)) {
         JSRefCountHeader *p = (JSRefCountHeader *)JS_VALUE_GET_PTR(v);
+        extern uint64_t inc_ref_count; inc_ref_count++;
         if (--p->ref_count <= 0) {
             __JS_FreeValue(ctx, v);
         }
@@ -610,6 +611,7 @@ static inline void JS_FreeValueRT(JSRuntime *rt, JSValue v)
 {
     if (JS_VALUE_HAS_REF_COUNT(v)) {
         JSRefCountHeader *p = (JSRefCountHeader *)JS_VALUE_GET_PTR(v);
+        extern uint64_t dec_ref_count; dec_ref_count++;
         if (--p->ref_count <= 0) {
             __JS_FreeValueRT(rt, v);
         }
@@ -620,6 +622,7 @@ static inline JSValue JS_DupValue(JSContext *ctx, JSValueConst v)
 {
     if (JS_VALUE_HAS_REF_COUNT(v)) {
         JSRefCountHeader *p = (JSRefCountHeader *)JS_VALUE_GET_PTR(v);
+        extern uint64_t inc_ref_count; inc_ref_count++;
         p->ref_count++;
     }
     return (JSValue)v;

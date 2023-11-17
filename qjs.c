@@ -511,6 +511,31 @@ int main(int argc, char **argv)
                best[1] + best[2] + best[3] + best[4],
                best[1], best[2], best[3], best[4]);
     }
+    extern uint64_t ref_count_buckets[9];
+    extern uint64_t op_count_buckets[9];
+    printf("=======================\n");
+    printf("ref count histogram:\n");
+    printf("     0: %lu\n", ref_count_buckets[0]);
+    printf("     1: %lu\n", ref_count_buckets[1]);
+    printf("   2-3: %lu\n", ref_count_buckets[2]);
+    printf("   4-7: %lu\n", ref_count_buckets[3]);
+    printf("  8-15: %lu\n", ref_count_buckets[4]);
+    printf(" 16-31: %lu\n", ref_count_buckets[5]);
+    printf(" 32-64: %lu\n", ref_count_buckets[6]);
+    printf("64-127: %lu\n", ref_count_buckets[7]);
+    printf("  more: %lu\n", ref_count_buckets[8]);
+    printf("=======================\n");
+    printf("op count histogram:\n");
+    printf("     0: %lu\n", op_count_buckets[0]);
+    printf("     1: %lu\n", op_count_buckets[1]);
+    printf("   2-3: %lu\n", op_count_buckets[2]);
+    printf("   4-7: %lu\n", op_count_buckets[3]);
+    printf("  8-15: %lu\n", op_count_buckets[4]);
+    printf(" 16-31: %lu\n", op_count_buckets[5]);
+    printf(" 32-64: %lu\n", op_count_buckets[6]);
+    printf("64-127: %lu\n", op_count_buckets[7]);
+    printf("  more: %lu\n", op_count_buckets[8]);
+    printf("=======================\n");
     return 0;
  fail:
     js_std_free_handlers(rt);
