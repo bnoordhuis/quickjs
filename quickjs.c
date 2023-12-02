@@ -16772,6 +16772,23 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
 
         CASE(OP_nop):
             BREAK;
+        CASE(OP_if_undefined_or_null):
+            if (JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_UNDEFINED ||
+                JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_NULL) {
+                uint8_t actions = get_u8(pc + 4);
+                int npop = actions & 15;
+                int npush = actions >> 4;
+                while (npop-- > 0)
+                    JS_FreeValue(ctx, *--sp);
+                while (npush-- > 0)
+                    *sp++ = JS_UNDEFINED;
+                pc += (int32_t)get_u32(pc);
+                if (unlikely(js_poll_interrupts(ctx)))
+                    goto exception;
+            } else {
+                pc += 5;
+            }
+            BREAK;
         CASE(OP_is_undefined_or_null):
             if (JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_UNDEFINED ||
                 JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_NULL) {
@@ -22436,18 +22453,13 @@ typedef enum FuncCallType {
 static void optional_chain_test(JSParseState *s, int *poptional_chaining_label,
                                 int drop_count)
 {
-    int label_next, i;
     if (*poptional_chaining_label < 0)
         *poptional_chaining_label = new_label(s);
-   /* XXX: could be more efficient with a specific opcode */
-    emit_op(s, OP_dup);
-    emit_op(s, OP_is_undefined_or_null);
-    label_next = emit_goto(s, OP_if_false, -1);
-    for(i = 0; i < drop_count; i++)
-        emit_op(s, OP_drop);
-    emit_op(s, OP_undefined);
-    emit_goto(s, OP_goto, *poptional_chaining_label);
-    emit_label(s, label_next);
+    emit_op(s, OP_if_undefined_or_null);
+    emit_u32(s, *poptional_chaining_label);
+    emit_u8(s, drop_count | 1<<4); // pop |drop_count|, push 1 undefined
+    update_label(s->cur_func, *poptional_chaining_label, 1);
+    s->cur_func->jump_size++;
 }
 
 /* allowed parse_flags: PF_POSTFIX_CALL, PF_ARROW_FUNC */
@@ -22748,7 +22760,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
             call_type = FUNC_CALL_TEMPLATE;
             goto parse_func_call2;
         } else if (s->token.val == '(' && accept_lparen) {
-            int opcode, arg_count, drop_count;
+            int opcode, pos, prev, arg_count, drop_count;
 
             /* function call */
         parse_func_call:
@@ -22757,28 +22769,54 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
 
             if (call_type == FUNC_CALL_NORMAL) {
             parse_func_call2:
-                switch(opcode = get_prev_opcode(fd)) {
+                opcode = OP_invalid;
+                prev = -1;
+                pos = fd->last_opcode_pos;
+                if (pos >= 0)
+                    opcode = fd->byte_code.buf[pos];
+                // Find the opcode preceding the label. This is theoretically
+                // an O(n*m) operation, where n == function bytecode size,
+                // and m == number of preceding labels, but in practice we
+                // only perform this scan for the single label terminating
+                // an optional chaining bytecode block (o?.p).
+                while (opcode == OP_label) {
+                    int next = 0, end = pos;
+                    while (next != end) {
+                        prev = pos;
+                        pos = next;
+                        opcode = fd->byte_code.buf[pos];
+                        next += opcode_info[opcode].size;
+                    }
+                }
+                switch(opcode) {
                 case OP_get_field:
                     /* keep the object on the stack */
-                    fd->byte_code.buf[fd->last_opcode_pos] = OP_get_field2;
-                    drop_count = 2;
-                    break;
+                    fd->byte_code.buf[pos] = OP_get_field2;
+                    goto adjust_stack;
                 case OP_scope_get_private_field:
                     /* keep the object on the stack */
-                    fd->byte_code.buf[fd->last_opcode_pos] = OP_scope_get_private_field2;
-                    drop_count = 2;
-                    break;
+                    fd->byte_code.buf[pos] = OP_scope_get_private_field2;
+                    goto adjust_stack;
                 case OP_get_array_el:
                     /* keep the object on the stack */
-                    fd->byte_code.buf[fd->last_opcode_pos] = OP_get_array_el2;
+                    fd->byte_code.buf[pos] = OP_get_array_el2;
+                    goto adjust_stack;
+                adjust_stack:
+                    // The OP_foo to OP_foo2 rewrites increase the push count
+                    // from 1 to 2. Make the preceding OP_if_undefined_or_null
+                    // push an extra undefined in the branch-taken path so
+                    // that both branches affect the stack the same way.
+                    if (prev >= 0)
+                        if (fd->byte_code.buf[prev] == OP_if_undefined_or_null)
+                            fd->byte_code.buf[prev + 5] += 0x10;
                     drop_count = 2;
                     break;
                 case OP_scope_get_var:
                     {
                         JSAtom name;
                         int scope;
-                        name = get_u32(fd->byte_code.buf + fd->last_opcode_pos + 1);
-                        scope = get_u16(fd->byte_code.buf + fd->last_opcode_pos + 5);
+                        name = get_u32(fd->byte_code.buf + pos + 1);
+                        scope = get_u16(fd->byte_code.buf + pos + 5);
                         if (name == JS_ATOM_eval && call_type == FUNC_CALL_NORMAL && !has_optional_chain) {
                             /* direct 'eval' */
                             opcode = OP_eval;
@@ -22793,14 +22831,14 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                                pass ? */
                             if (has_with_scope(fd, scope)) {
                                 opcode = OP_scope_get_ref;
-                                fd->byte_code.buf[fd->last_opcode_pos] = opcode;
+                                fd->byte_code.buf[pos] = opcode;
                             }
                         }
                         drop_count = 1;
                     }
                     break;
                 case OP_get_super_value:
-                    fd->byte_code.buf[fd->last_opcode_pos] = OP_get_array_el;
+                    fd->byte_code.buf[pos] = OP_get_array_el;
                     /* on stack: this func_obj */
                     opcode = OP_get_array_el;
                     drop_count = 2;
@@ -27047,6 +27085,7 @@ static void dump_byte_code(JSContext *ctx, int pass,
                 pos += 4;
                 /* fall thru */
             case OP_FMT_label:
+            case OP_FMT_label_u8:
             case OP_FMT_label_u16:
                 pos++;
                 addr = get_u32(tab + pos);
@@ -27171,6 +27210,16 @@ static void dump_byte_code(JSContext *ctx, int pass,
                 printf(" %u:%u", addr, label_slots[addr].pos2);
             if (pass == 3)
                 printf(" %u", addr + pos);
+            break;
+        case OP_FMT_label_u8:
+            addr = get_u32(tab + pos);
+            if (pass == 1)
+                printf(" %u:%u", addr, label_slots[addr].pos);
+            if (pass == 2)
+                printf(" %u:%u", addr, label_slots[addr].pos2);
+            if (pass == 3)
+                printf(" %u", addr + pos);
+            printf(",%02x", get_u8(tab + pos + 4));
             break;
         case OP_FMT_label_u16:
             addr = get_u32(tab + pos);
@@ -28671,6 +28720,12 @@ static BOOL code_match(CodeContext *s, int pos, ...)
                 s->label = get_u32(tab + pos);
                 break;
             }
+        case OP_FMT_label_u8:
+            {
+                s->label = get_u32(tab + pos);
+                s->val = get_u8(tab + pos + 4);
+                break;
+            }
         case OP_FMT_label_u16:
             {
                 s->label = get_u32(tab + pos);
@@ -28866,6 +28921,7 @@ static int skip_dead_code(JSFunctionDef *s, const uint8_t *bc_buf, int bc_len,
             JSAtom atom;
             switch(opcode_info[op].fmt) {
             case OP_FMT_label:
+            case OP_FMT_label_u8:
             case OP_FMT_label_u16:
                 label = get_u32(bc_buf + pos + 1);
                 update_label(s, label, -1);
@@ -29641,6 +29697,11 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
             }
             goto has_label;
 
+        case OP_if_undefined_or_null:
+            label = get_u32(bc_buf + pos + 1);
+            label = find_jump_target(s, label, &op1, NULL);
+            goto has_label;
+
         case OP_gosub:
             label = get_u32(bc_buf + pos + 1);
             goto has_label;
@@ -29728,6 +29789,8 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
                 if (!add_reloc(ctx, ls, bc_out.size - 4, 4))
                     goto fail;
             }
+            if (len > 5)
+                dbuf_put(&bc_out, &bc_buf[pos + 5], len - 5);
             break;
         case OP_with_get_var:
         case OP_with_put_var:
@@ -30343,7 +30406,7 @@ static __exception int compute_stack_size(JSContext *ctx,
                                           int *pstack_size)
 {
     StackSizeState s_s, *s = &s_s;
-    int i, diff, n_pop, pos_next, stack_len, pos, op;
+    int i, diff, n_pop, n_push, pos_next, stack_len, pos, op;
     const JSOpCode *oi;
     const uint8_t *bc_buf;
 
@@ -30380,18 +30443,23 @@ static __exception int compute_stack_size(JSContext *ctx,
             goto fail;
         }
         n_pop = oi->n_pop;
+        n_push = oi->n_push;
         /* call pops a variable number of arguments */
         if (oi->fmt == OP_FMT_npop || oi->fmt == OP_FMT_npop_u16) {
             n_pop += get_u16(bc_buf + pos + 1);
         } else if (oi->fmt == OP_FMT_npopx) {
             n_pop += op - OP_call0;
+        } else if (op == OP_if_undefined_or_null) {
+            uint8_t actions = get_u8(bc_buf + pos + 5);
+            n_pop += actions & 15;
+            n_push += actions >> 4;
         }
 
         if (stack_len < n_pop) {
             JS_ThrowInternalError(ctx, "stack underflow (op=%d, pc=%d)", op, pos);
             goto fail;
         }
-        stack_len += oi->n_push - n_pop;
+        stack_len += n_push - n_pop;
         if (stack_len > s->stack_len_max) {
             s->stack_len_max = stack_len;
             if (s->stack_len_max > JS_STACK_SIZE_MAX) {
@@ -30409,6 +30477,7 @@ static __exception int compute_stack_size(JSContext *ctx,
         case OP_throw_error:
         case OP_ret:
             goto done_insn;
+        case OP_if_undefined_or_null:
         case OP_goto:
             diff = get_u32(bc_buf + pos + 1);
             pos_next = pos + 1 + diff;
@@ -32088,6 +32157,7 @@ static void bc_byte_swap(uint8_t *bc_buf, int bc_len)
         case OP_FMT_label:
         case OP_FMT_atom:
         case OP_FMT_atom_u8:
+        case OP_FMT_label_u8:
             put_u32(bc_buf + pos + 1,
                     bswap32(get_u32(bc_buf + pos + 1)));
             break;

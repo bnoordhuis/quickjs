@@ -52,6 +52,7 @@ FMT(atom_u8)
 FMT(atom_u16)
 FMT(atom_label_u8)
 FMT(atom_label_u16)
+FMT(label_u8)
 FMT(label_u16)
 #undef FMT
 #endif /* FMT */
@@ -257,6 +258,7 @@ DEF(             eq, 1, 2, 1, none)
 DEF(            neq, 1, 2, 1, none)
 DEF(      strict_eq, 1, 2, 1, none)
 DEF(     strict_neq, 1, 2, 1, none)
+DEF(if_undefined_or_null, 6, 0, 0, label_u8) // note: variadic push/pop count
 DEF(is_undefined_or_null, 1, 1, 1, none)
 /* must be the last non short and non temporary opcode */
 DEF(            nop, 1, 0, 0, none)
