@@ -63,6 +63,7 @@ typedef enum {
 
 #define TMP_BUF_SIZE 128
 
+// invariant: is_unicode ^ unicode_sets (or neither, but not both)
 typedef struct {
     DynBuf byte_code;
     const uint8_t *buf_ptr;
@@ -70,6 +71,7 @@ typedef struct {
     const uint8_t *buf_start;
     int re_flags;
     BOOL is_unicode;
+    BOOL unicode_sets;
     BOOL ignore_case;
     BOOL dotall;
     int capture_count;
@@ -853,6 +855,8 @@ static int re_emit_range(REParseState *s, const CharRange *cr)
     return 0;
 }
 
+// s->unicode turns patterns like []] into syntax errors
+// s->unicode_sets turns more patterns into errors, like [a-] or [[]
 static int re_parse_char_class(REParseState *s, const uint8_t **pp)
 {
     const uint8_t *p;
@@ -876,34 +880,40 @@ static int re_parse_char_class(REParseState *s, const uint8_t **pp)
         if ((int)c1 < 0)
             goto fail;
         if (*p == '-' && p[1] != ']') {
-            const uint8_t *p0 = p + 1;
-            if (c1 >= CLASS_RANGE_BASE) {
-                if (s->is_unicode) {
-                    cr_free(cr1);
-                    goto invalid_class_range;
-                }
-                /* Annex B: match '-' character */
-                goto class_atom;
-            }
-            c2 = get_class_atom(s, cr1, &p0, TRUE);
-            if ((int)c2 < 0)
-                goto fail;
-            if (c2 >= CLASS_RANGE_BASE) {
+            if (s->unicode_sets && p[1] == '-') {
                 cr_free(cr1);
-                if (s->is_unicode) {
-                    goto invalid_class_range;
-                }
-                /* Annex B: match '-' character */
-                goto class_atom;
-            }
-            p = p0;
-            if (c2 < c1) {
-            invalid_class_range:
-                re_parse_error(s, "invalid class range");
+                re_parse_error(s, "TODO implement regexp-v-flag");
                 goto fail;
+            } else {
+                const uint8_t *p0 = p + 1;
+                if (c1 >= CLASS_RANGE_BASE) {
+                    if (s->is_unicode) {
+                        cr_free(cr1);
+                        goto invalid_class_range;
+                    }
+                    /* Annex B: match '-' character */
+                    goto class_atom;
+                }
+                c2 = get_class_atom(s, cr1, &p0, TRUE);
+                if ((int)c2 < 0)
+                    goto fail;
+                if (c2 >= CLASS_RANGE_BASE) {
+                    cr_free(cr1);
+                    if (s->is_unicode) {
+                        goto invalid_class_range;
+                    }
+                    /* Annex B: match '-' character */
+                    goto class_atom;
+                }
+                p = p0;
+                if (c2 < c1) {
+                invalid_class_range:
+                    re_parse_error(s, "invalid class range");
+                    goto fail;
+                }
+                if (cr_union_interval(cr, c1, c2))
+                    goto memory_error;
             }
-            if (cr_union_interval(cr, c1, c2))
-                goto memory_error;
         } else {
         class_atom:
             if (c1 >= CLASS_RANGE_BASE) {
@@ -1843,6 +1853,7 @@ uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
     is_sticky = ((re_flags & LRE_FLAG_STICKY) != 0);
     s->ignore_case = ((re_flags & LRE_FLAG_IGNORECASE) != 0);
     s->dotall = ((re_flags & LRE_FLAG_DOTALL) != 0);
+    s->unicode_sets = ((re_flags & LRE_FLAG_UNICODE_SETS) != 0);
     s->capture_count = 1;
     s->total_capture_count = -1;
     s->has_named_captures = -1;
