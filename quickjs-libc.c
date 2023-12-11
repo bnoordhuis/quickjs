@@ -148,6 +148,7 @@ typedef struct JSThreadState {
     JSWorkerMessagePipe *recv_pipe, *send_pipe;
 } JSThreadState;
 
+static uint64_t os_nanos_base;
 static uint64_t os_pending_signals;
 static int (*os_poll_func)(JSContext *ctx);
 
@@ -1988,6 +1989,12 @@ static JSValue js_os_now(JSContext *ctx, JSValue this_val,
     return JS_NewInt64(ctx, js__hrtime_ns() / 1000);
 }
 
+static JSValue js_os_nanos(JSContext *ctx, JSValue this_val,
+                           int argc, JSValue *argv)
+{
+    return JS_NewInt64(ctx, js__hrtime_ns() - os_nanos_base);
+}
+
 static void unlink_timer(JSRuntime *rt, JSOSTimer *th)
 {
     if (th->link.prev) {
@@ -3645,6 +3652,7 @@ static const JSCFunctionListEntry js_os_funcs[] = {
     JS_CFUNC_DEF("cputime", 0, js_os_cputime ),
 #endif
     JS_CFUNC_DEF("now", 0, js_os_now ),
+    JS_CFUNC_DEF("nanos", 0, js_os_nanos ),
     JS_CFUNC_DEF("setTimeout", 2, js_os_setTimeout ),
     JS_CFUNC_DEF("clearTimeout", 1, js_os_clearTimeout ),
     JS_PROP_STRING_DEF("platform", OS_PLATFORM, 0 ),
@@ -3687,6 +3695,7 @@ static int js_os_init(JSContext *ctx, JSModuleDef *m)
 {
     JSRuntime *rt = JS_GetRuntime(ctx);
     os_poll_func = js_os_poll;
+    os_nanos_base = js__hrtime_ns();
 
     /* OSTimer class */
     JS_NewClassID(rt, &js_os_timer_class_id);
