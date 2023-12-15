@@ -287,5 +287,13 @@ DEF(XID_Start, "XIDS")
 
 /* internal tables with index */
 DEF(Cased1, "")
+#endif
 
+#ifdef UNICODE_EMOJI_LIST
+DEF(Basic_Emoji, "")
+DEF(Emoji_Keycap_Sequence, "")
+DEF(RGI_Emoji_Flag_Sequence, "")
+DEF(RGI_Emoji_Modifier_Sequence, "")
+DEF(RGI_Emoji_Tag_Sequence, "")
+DEF(RGI_Emoji_ZWJ_Sequence, "")
 #endif

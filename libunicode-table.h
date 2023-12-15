@@ -4482,3 +4482,4 @@ static const uint16_t unicode_prop_len_table[] = {
     countof(unicode_prop_ID_Start_table),
     countof(unicode_prop_Case_Ignorable_table),
 };
+

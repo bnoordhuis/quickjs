@@ -30,6 +30,7 @@
 
 #include "cutils.h"
 #include "libregexp.h"
+#include "libregexp-emoji.h"
 
 /*
   TODO:
@@ -205,6 +206,7 @@ static const uint16_t char_range_w[] = {
     0x0061, 0x007A + 1,
 };
 
+#define CLASS_EMOJI_BASE 0x30000000
 #define CLASS_RANGE_BASE 0x40000000
 
 typedef enum {
@@ -269,6 +271,19 @@ static int cr_canonicalize(CharRange *cr)
  fail:
     cr_free(&a);
     return ret;
+}
+
+static const uint8_t *unicode_emoji(int idx, size_t *plen)
+{
+    const uint32_t *pos;
+
+    assert(idx >= CLASS_EMOJI_BASE);
+    assert(idx < CLASS_EMOJI_BASE + countof(unicode_emoji_name_table));
+
+    pos = &unicode_emoji_idx_table[idx - CLASS_EMOJI_BASE];
+    *plen = pos[1] - pos[0];
+
+    return &unicode_emoji_table[pos[0]];
 }
 
 #ifdef DUMP_REOP
@@ -613,11 +628,13 @@ static BOOL is_unicode_char(int c)
 static int parse_unicode_property(REParseState *s, CharRange *cr,
                                   const uint8_t **pp, BOOL is_inv)
 {
+    const uint8_t *re;
     const uint8_t *p;
     char name[64], value[64];
     char *q;
+    size_t len;
     BOOL script_ext;
-    int ret;
+    int idx, ret;
 
     p = *pp;
     if (*p != '{')
@@ -644,6 +661,16 @@ static int parse_unicode_property(REParseState *s, CharRange *cr,
         return re_parse_error(s, "expecting '}'");
     p++;
     //    printf("name=%s value=%s\n", name, value);
+
+    // TODO(bnoordhuis) is Basic_Emoji=PropName a thing? I'm guessing no
+    if (value[0] == '\0') {
+        for (idx = 0; idx < countof(unicode_emoji_name_table); idx++) {
+            if (!strcmp(name, unicode_emoji_name_table[idx])) {
+                *pp = p;
+                return CLASS_EMOJI_BASE + idx;
+            }
+        }
+    }
 
     if (!strcmp(name, "Script") || !strcmp(name, "sc")) {
         script_ext = FALSE;
@@ -699,14 +726,14 @@ static int parse_unicode_property(REParseState *s, CharRange *cr,
         }
     }
     *pp = p;
-    return 0;
+    return CLASS_RANGE_BASE;
  out_of_memory:
     return re_parse_out_of_memory(s);
 }
 
 /* return -1 if error otherwise the character or a class range
-   (CLASS_RANGE_BASE). In case of class range, 'cr' is
-   initialized. Otherwise, it is ignored. */
+   (CLASS_RANGE_BASE) or an emoji sequence (CLASS_EMOJI_BASE + idx).
+   In case of class range, 'cr' is initialized. Otherwise, it is ignored. */
 static int get_class_atom(REParseState *s, CharRange *cr,
                           const uint8_t **pp, BOOL inclass)
 {
@@ -765,9 +792,9 @@ static int get_class_atom(REParseState *s, CharRange *cr,
         case 'p':
         case 'P':
             if (s->is_unicode) {
-                if (parse_unicode_property(s, cr, &p, (c == 'P')))
+                c = parse_unicode_property(s, cr, &p, (c == 'P'));
+                if (c < 0)
                     return -1;
-                c = CLASS_RANGE_BASE;
                 break;
             }
             /* fall thru */
@@ -884,6 +911,8 @@ static int re_parse_char_class(REParseState *s, const uint8_t **pp)
                 }
                 /* Annex B: match '-' character */
                 goto class_atom;
+            } else if (c1 >= CLASS_EMOJI_BASE) {
+                // TODO
             }
             c2 = get_class_atom(s, cr1, &p0, TRUE);
             if ((int)c2 < 0)
@@ -895,6 +924,8 @@ static int re_parse_char_class(REParseState *s, const uint8_t **pp)
                 }
                 /* Annex B: match '-' character */
                 goto class_atom;
+            } else if (c2 >= CLASS_EMOJI_BASE) {
+                // TODO
             }
             p = p0;
             if (c2 < c1) {
@@ -912,6 +943,8 @@ static int re_parse_char_class(REParseState *s, const uint8_t **pp)
                 cr_free(cr1);
                 if (ret)
                     goto memory_error;
+            } else if (c1 >= CLASS_EMOJI_BASE) {
+                // TODO
             } else {
                 if (cr_union_interval(cr, c1, c1))
                     goto memory_error;
@@ -1491,6 +1524,8 @@ static int re_parse_term(REParseState *s, BOOL is_backward_dir)
             cr_free(cr);
             if (ret)
                 return -1;
+        } else if (c >= CLASS_EMOJI_BASE) {
+            // TODO
         } else {
             if (s->ignore_case)
                 c = lre_canonicalize(c, s->is_unicode);
@@ -2561,13 +2596,30 @@ const char *lre_get_groupnames(const uint8_t *bc_buf)
     return (const char *)(bc_buf + RE_HEADER_LEN + re_bytecode_len);
 }
 
+uint8_t *lre_bc_buf(uint8_t *buf) {
+    return &buf[RE_HEADER_LEN];
+}
+
+uint32_t lre_bc_len(uint8_t *buf, BOOL is_byte_swapped) {
+    uint32_t n;
+
+    n = get_u32(&buf[RE_HEADER_BYTECODE_LEN]);
+    if (is_byte_swapped)
+        n = bswap32(n);
+
+    return n;
+}
+
 void lre_byte_swap(uint8_t *buf, size_t len, BOOL is_byte_swapped)
 {
     uint8_t *p, *pe;
     uint32_t n, r;
 
-    p = buf;
     if (len < RE_HEADER_LEN)
+        abort();
+
+    n = lre_bc_len(buf, is_byte_swapped);
+    if (n > len - RE_HEADER_LEN)
         abort();
 
     // format is:
@@ -2576,14 +2628,8 @@ void lre_byte_swap(uint8_t *buf, size_t len, BOOL is_byte_swapped)
     //  <capture group name 1>
     //  <capture group name 2>
     //  etc.
-    inplace_bswap16(&p[RE_HEADER_FLAGS]);
-
-    n = get_u32(&p[RE_HEADER_BYTECODE_LEN]);
-    inplace_bswap32(&p[RE_HEADER_BYTECODE_LEN]);
-    if (is_byte_swapped)
-        n = bswap32(n);
-    if (n > len - RE_HEADER_LEN)
-        abort();
+    inplace_bswap16(&buf[RE_HEADER_FLAGS]);
+    inplace_bswap32(&buf[RE_HEADER_BYTECODE_LEN]);
 
     p = &buf[RE_HEADER_LEN];
     pe = &p[n];
@@ -2637,6 +2683,10 @@ BOOL lre_check_stack_overflow(void *opaque, size_t alloca_size)
 
 void *lre_realloc(void *opaque, void *ptr, size_t size)
 {
+    if (size == 0) {
+        free(ptr);
+        return NULL;
+    }
     return realloc(ptr, size);
 }
 

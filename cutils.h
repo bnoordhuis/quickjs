@@ -225,6 +225,15 @@ static inline void put_u8(uint8_t *tab, uint8_t val)
     *tab = val;
 }
 
+static inline BOOL is_be(void)
+{
+    union {
+        uint16_t a;
+        uint8_t  b;
+    } u = {0x100};
+    return u.b;
+}
+
 #ifndef bswap16
 static inline uint16_t bswap16(uint16_t x)
 {

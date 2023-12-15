@@ -32165,15 +32165,6 @@ static const char * const bc_tag_str[] = {
 };
 #endif
 
-static inline BOOL is_be(void)
-{
-    union {
-        uint16_t a;
-        uint8_t  b;
-    } u = {0x100};
-    return u.b;
-}
-
 static void bc_put_u8(BCWriterState *s, uint8_t v)
 {
     dbuf_putc(&s->dbuf, v);

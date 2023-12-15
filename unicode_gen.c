@@ -32,6 +32,7 @@
 #include <time.h>
 
 #include "cutils.h"
+#include "libregexp.h"
 
 /* define it to be able to test unicode.c */
 //#define USE_TEST
@@ -63,6 +64,20 @@
 
 #define CHARCODE_MAX 0x10ffff
 #define CC_LEN_MAX 3
+
+BOOL lre_check_stack_overflow(void *opaque, size_t alloca_size)
+{
+    return FALSE;
+}
+
+void *lre_realloc(void *opaque, void *ptr, size_t size)
+{
+    if (size == 0) {
+        free(ptr);
+        return NULL;
+    }
+    return realloc(ptr, size);
+}
 
 void *mallocz(size_t size)
 {
@@ -218,6 +233,33 @@ static const char *unicode_prop_short_name[] = {
 };
 
 #undef UNICODE_PROP_LIST
+
+#define UNICODE_EMOJI_LIST
+
+typedef enum {
+#define DEF(id, str) EMOJI_ ## id,
+#include "unicode_gen_def.h"
+#undef DEF
+    EMOJI_COUNT,
+} UnicodeEmojiEnum1;
+
+static const char *unicode_emoji_name[] = {
+#define DEF(id, str) #id,
+#include "unicode_gen_def.h"
+#undef DEF
+};
+
+static DynBuf unicode_emoji_patterns[EMOJI_COUNT];
+
+#undef UNICODE_EMOJI_LIST
+
+// if range==TRUE, cp[0]..cp[1] is the range, inclusive
+// if range==FALSE, cp[0]..cp[n] is the sequence, cp[n+1]==0 (sentinel)
+// if range==FALSE, cp[1]==0 indicates a single codepoint in cp[0]
+typedef struct {
+    uint32_t cp[16];
+    BOOL range;
+} Seq;
 
 typedef struct {
     /* case conv */
@@ -710,6 +752,80 @@ void parse_prop_list(const char *filename)
             }
             for(c = c0; c <= c1; c++) {
                 set_prop(c, i, 1);
+            }
+        }
+    }
+    fclose(f);
+}
+
+void parse_emoji_list(const char *filename)
+{
+    FILE *f;
+    char line[4096], *p, buf[256], *q;
+    uint32_t *cp;
+    DynBuf *dbuf;
+    Seq s;
+    int i;
+
+    f = fopen(filename, "rb");
+    if (!f) {
+        perror(filename);
+        exit(1);
+    }
+
+    for(;;) {
+        if (!get_line(line, sizeof(line), f))
+            break;
+        p = line;
+        while (isspace(*p))
+            p++;
+        if (*p == '#' || *p == '@' || *p == '\0')
+            continue;
+        s.cp[0] = strtoul(p, (char **)&p, 16);
+        if (*p == '.' && p[1] == '.') {
+            p += 2;
+            s.cp[1] = strtoul(p, (char **)&p, 16);
+            s.range = TRUE;
+        } else {
+            s.range = FALSE;
+            cp = &s.cp[1];
+            do
+                *cp = strtoul(p, (char **)&p, 16);
+            while (*cp && ++cp < endof(s.cp));
+            assert(cp < endof(s.cp));
+        }
+        p += strspn(p, " \t");
+        if (*p == ';') {
+            p++;
+            p += strspn(p, " \t");
+            q = buf;
+            static const char fini[] = " \t;#";
+            while (!memchr(fini, *p, sizeof(fini))) {
+                if ((q - buf) < sizeof(buf) - 1)
+                    *q++ = *p;
+                p++;
+            }
+            *q = '\0';
+            i = find_name(unicode_emoji_name, countof(unicode_emoji_name), buf);
+            if (i < 0) {
+                fprintf(stderr, "Property not found: %s\n", buf);
+                exit(1);
+            }
+            dbuf = &unicode_emoji_patterns[i];
+            if (!dbuf->opaque) {
+                dbuf_init(dbuf);
+                dbuf->opaque = "initialized";
+            }
+            if (dbuf->size) {
+                dbuf_putc(dbuf, '|');
+            }
+            if (s.range) {
+                dbuf_printf(dbuf, "[\\u{%x}-\\u{%x}]", s.cp[0], s.cp[1]);
+            } else {
+                cp = &s.cp[0];
+                while (*cp) {
+                    dbuf_printf(dbuf, "\\u{%x}", *cp++);
+                }
             }
         }
     }
@@ -1738,6 +1854,55 @@ void build_prop_list_table(FILE *f)
         fprintf(f, "    countof(unicode_prop_%s_table),\n", unicode_prop_name[i]);
     }
     fprintf(f, "};\n\n");
+}
+
+void build_emoji_table(FILE *f)
+{
+    size_t indices[EMOJI_COUNT] = {0};
+    DynBuf *pat, dbuf_s, *dbuf = &dbuf_s;
+    char errbuf[256];
+    int i, len;
+    uint8_t *re;
+
+    dbuf_init(dbuf);
+    for (i = 0; i < EMOJI_COUNT; i++) {
+        indices[i] = dbuf->size;
+        pat = &unicode_emoji_patterns[i];
+        if (!pat->opaque) {
+            continue;
+        }
+        dbuf_putc(pat, '\0');
+        re = lre_compile(&len, errbuf, sizeof(errbuf),
+                         (char *) pat->buf, pat->size - 1,
+                         LRE_FLAG_UNICODE, NULL);
+        if (!re) {
+            printf("%s: %s\n", unicode_emoji_name[i], errbuf);
+            exit(1);
+        }
+        if (is_be()) {
+            lre_byte_swap(re, len, /*is_byte_swapped*/FALSE);
+        }
+        len = lre_bc_len(re, /*is_byte_swapped*/is_be());
+        dbuf_put(dbuf, lre_bc_buf(re), len);
+        dbuf_free(pat);
+        free(re);
+    }
+
+    fprintf(f, "static const char unicode_emoji_name_table[][32] = {\n");
+    for(i = 0; i < EMOJI_COUNT; i++) {
+        fprintf(f, "    \"%s\",\n", unicode_emoji_name[i]);
+    }
+    fprintf(f, "};\n\n");
+
+    fprintf(f, "static const uint32_t unicode_emoji_idx_table[] = {\n");
+    for(i = 0; i < EMOJI_COUNT; i++) {
+        fprintf(f, "    %zu,\n", indices[i]);
+    }
+    fprintf(f, "    %zu,\n", dbuf->size);
+    fprintf(f, "};\n\n");
+
+    dump_byte_table(f, "unicode_emoji_table", dbuf->buf, dbuf->size);
+    dbuf_free(dbuf);
 }
 
 #ifdef USE_TEST
@@ -2901,20 +3066,22 @@ void normalization_test(const char *filename)
 
 int main(int argc, char **argv)
 {
-    const char *unicode_db_path, *outfilename;
+    const char *unicode_db_path, *outunicode = NULL, *outregexp = NULL;
     char filename[1024];
 
     if (argc < 2) {
-        printf("usage: %s unicode_db_path [output_file]\n"
+        printf("usage: %s unicode_db_path [libunicode-table.h] [libregexp-emoji.h]\n"
                "\n"
-               "If no output_file is given, a self test is done using the current unicode library\n",
+               "Runs a self test on unicode_db_path when no output files are given\n",
                argv[0]);
         exit(1);
     }
+
     unicode_db_path = argv[1];
-    outfilename = NULL;
     if (argc >= 3)
-        outfilename = argv[2];
+        outunicode = argv[2];
+    if (argc >= 4)
+        outregexp = argv[3];
 
     unicode_db = mallocz(sizeof(unicode_db[0]) * (CHARCODE_MAX + 1));
 
@@ -2951,13 +3118,21 @@ int main(int argc, char **argv)
              unicode_db_path);
     parse_prop_list(filename);
 
+    snprintf(filename, sizeof(filename), "%s/emoji-sequences.txt",
+             unicode_db_path);
+    parse_emoji_list(filename);
+
+    snprintf(filename, sizeof(filename), "%s/emoji-zwj-sequences.txt",
+             unicode_db_path);
+    parse_emoji_list(filename);
+
     //    dump_data(unicode_db);
 
     build_conv_table(unicode_db);
 
     //    dump_table();
 
-    if (!outfilename) {
+    if (!outunicode) {
 #ifdef USE_TEST
         check_case_conv();
         check_flags();
@@ -2970,12 +3145,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "Tests are not compiled\n");
         exit(1);
 #endif
-    } else
-    {
-        FILE *fo = fopen(outfilename, "wb");
-
+    } else {
+        FILE *fo = fopen(outunicode, "wb");
         if (!fo) {
-            perror(outfilename);
+            perror(outunicode);
             exit(1);
         }
         fprintf(fo,
@@ -2995,5 +3168,19 @@ int main(int argc, char **argv)
         build_prop_list_table(fo);
         fclose(fo);
     }
+
+    if (outregexp) {
+        FILE *fo = fopen(outregexp, "wb");
+        if (!fo) {
+            perror(outunicode);
+            exit(1);
+        }
+        fprintf(fo,
+                "/* Automatically generated file - do not edit */\n"
+                "#include <stdint.h>\n");
+        build_emoji_table(fo);
+        fclose(fo);
+    }
+
     return 0;
 }

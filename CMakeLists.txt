@@ -231,6 +231,7 @@ endif()
 
 add_executable(unicode_gen EXCLUDE_FROM_ALL
     cutils.c
+    libregexp.c
     libunicode.c
     unicode_gen.c
 )
