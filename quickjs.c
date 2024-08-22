@@ -46140,6 +46140,126 @@ static int JS_WriteSet(BCWriterState *s, struct JSMapState *map_state)
     return js_map_write(s, map_state, MAGIC_SET);
 }
 
+enum {
+    SET_DIFFERENCE,
+    SET_INTERSECTION,
+    SET_SYMMETRIC_DIFFERENCE,
+    SET_UNION,
+    SET_IS_DISJOINT_FROM,
+    SET_IS_SUBSET_OF,
+    SET_IS_SUPERSET_OF,
+};
+
+static JSValue js_set_method(JSContext *ctx, JSValue this_val,
+                             int argc, JSValue *argv, int magic)
+{
+    JSValue ret, result, method, iter, key;
+    JSMapState *s;
+    uint32_t size;
+    BOOL done;
+    double d;
+
+    result = JS_FALSE;
+    method = JS_UNDEFINED;
+    iter = JS_UNDEFINED;
+    key = JS_UNDEFINED;
+    s = JS_GetOpaque2(ctx, this_val, JS_CLASS_SET);
+    if (!s)
+        return JS_EXCEPTION;
+    ret = JS_GetProperty(ctx, argv[0], JS_ATOM_size);
+    if (JS_IsException(ret))
+        return JS_EXCEPTION;
+    if (JS_IsUndefined(ret))
+        return JS_ThrowTypeError(ctx, "size is undefined");
+    if (JS_ToFloat64Free(ctx, &d, ret))
+        return JS_EXCEPTION;
+    if (isnan(d))
+        return JS_ThrowTypeError(ctx, "size is NaN");
+    if (d < 0)
+        return JS_ThrowTypeError(ctx, "size must be >= 0");
+    size = UINT32_MAX;
+    if (d < UINT32_MAX)
+        size = (uint32_t)d;
+    if (magic < SET_IS_DISJOINT_FROM)
+        result = js_map_constructor(ctx, JS_UNDEFINED, 0, NULL, MAGIC_SET);
+    if (JS_IsException(result))
+        return JS_EXCEPTION;
+    if (s->record_count < size) {
+        method = JS_GetProperty(ctx, argv[0], JS_ATOM_has);
+        if (JS_IsException(method))
+            goto exception;
+        iter = js_create_map_iterator(ctx, this_val, 0, NULL, MAGIC_SET);
+        if (JS_IsException(iter))
+            goto exception;
+        for(;;) {
+            key = js_map_iterator_next(ctx, iter, 0, NULL, &done, MAGIC_SET);
+            if (JS_IsException(key))
+                goto exception;
+            if (done) // key is JS_UNDEFINED
+                break;
+            ret = JS_Call(ctx, method, argv[0], 1, &key);
+            if (JS_IsException(ret))
+                goto exception;
+            if (JS_ToBoolFree(ctx, ret)) {
+                // TODO
+            } else {
+                switch(magic) {
+                case SET_DIFFERENCE:
+                    ret = js_map_set(ctx, result, 1, &key, MAGIC_SET);
+                    if (JS_IsException(ret))
+                        goto exception;
+                    JS_FreeValue(ctx, ret);
+                    break;
+                }
+            }
+            JS_FreeValue(ctx, key);
+        }
+    } else {
+        method = JS_GetProperty(ctx, argv[0], JS_ATOM_keys);
+        if (JS_IsException(method))
+            goto exception;
+        ret = JS_Call(ctx, method, argv[0], 0, NULL);
+        if (JS_IsException(ret))
+            goto exception;
+        iter = JS_GetIterator(ctx, ret, /*is_async*/FALSE);
+        JS_FreeValue(ctx, ret);
+        if (JS_IsException(iter))
+            goto exception;
+        JS_FreeValue(ctx, method);
+        method = JS_GetProperty(ctx, iter, JS_ATOM_next);
+        if (JS_IsException(method))
+            goto exception;
+        for(;;) { // TODO(bnoordhuis) quadratic because map_find_record is O(n)
+            key = JS_IteratorNext(ctx, iter, method, 0, NULL, &done);
+            if (JS_IsException(key))
+                goto exception;
+            if (done) // key is JS_UNDEFINED
+                break;
+            if (map_find_record(ctx, s, key)) {
+                // TODO
+            } else {
+                if (magic == SET_DIFFERENCE) {
+                    ret = js_map_set(ctx, result, 1, &key, MAGIC_SET);
+                    if (JS_IsException(ret))
+                        goto exception;
+                    JS_FreeValue(ctx, ret);
+                    break;
+                }
+            }
+            JS_FreeValue(ctx, key);
+        }
+    }
+    JS_FreeValue(ctx, method);
+    JS_FreeValue(ctx, iter);
+    return result;
+exception:
+    JS_FreeValue(ctx, result);
+    JS_FreeValue(ctx, method);
+    JS_FreeValue(ctx, iter);
+    JS_FreeValue(ctx, key);
+    return JS_EXCEPTION;
+}
+
 static const JSCFunctionListEntry js_map_funcs[] = {
     JS_CFUNC_DEF("groupBy", 2, js_map_groupBy ),
     JS_CGETSET_DEF("[Symbol.species]", js_get_this, NULL ),
@@ -46172,6 +46292,13 @@ static const JSCFunctionListEntry js_set_proto_funcs[] = {
     JS_CFUNC_MAGIC_DEF("clear", 0, js_map_clear, MAGIC_SET ),
     JS_CGETSET_MAGIC_DEF("size", js_map_get_size, NULL, MAGIC_SET ),
     JS_CFUNC_MAGIC_DEF("forEach", 1, js_map_forEach, MAGIC_SET ),
+    JS_CFUNC_MAGIC_DEF("difference", 1, js_set_method, SET_DIFFERENCE ),
+    JS_CFUNC_MAGIC_DEF("intersection", 1, js_set_method, SET_INTERSECTION ),
+    JS_CFUNC_MAGIC_DEF("symmetricDifference", 1, js_set_method, SET_SYMMETRIC_DIFFERENCE ),
+    JS_CFUNC_MAGIC_DEF("union", 1, js_set_method, SET_UNION ),
+    JS_CFUNC_MAGIC_DEF("isDisjointFrom", 1, js_set_method, SET_IS_DISJOINT_FROM ),
+    JS_CFUNC_MAGIC_DEF("isSubsetOf", 1, js_set_method, SET_IS_SUBSET_OF ),
+    JS_CFUNC_MAGIC_DEF("isSupersetOf", 1, js_set_method, SET_IS_SUPERSET_OF ),
     JS_CFUNC_MAGIC_DEF("values", 0, js_create_map_iterator, (JS_ITERATOR_KIND_KEY << 2) | MAGIC_SET ),
     JS_ALIAS_DEF("keys", "values" ),
     JS_ALIAS_DEF("[Symbol.iterator]", "values" ),
