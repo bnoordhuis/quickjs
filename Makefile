@@ -84,7 +84,7 @@ stats: $(QJS)
 	$(QJS) -qd
 
 # implicitly .PHONY because it doesn't generate output
-cxxtest: CXXFLAGS+=-Wall -Wextra -Werror -Wno-unused-parameter -fsyntax-only
+cxxtest: CXXFLAGS+=-std=c++11 -fsyntax-only -Wall -Wextra -Werror -Wno-unused-parameter
 cxxtest: cxxtest.cc quickjs.h
 	$(CXX) $(CXXFLAGS) -DJS_NAN_BOXING=0 $<
 	$(CXX) $(CXXFLAGS) -DJS_NAN_BOXING=1 $<
