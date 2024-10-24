@@ -221,8 +221,8 @@ jobs:
           arch: ${{ matrix.arch == 'x64' && 'x64' || 'x86' }}
       - name: cxxtest
         run: |
-          cl.exe /std:c++11 /DJS_NAN_BOXING=0 /Zs cxxtest.cc
-          cl.exe /std:c++11 /DJS_NAN_BOXING=1 /Zs cxxtest.cc
+          cl.exe /DJS_NAN_BOXING=0 /Zs cxxtest.cc
+          cl.exe /DJS_NAN_BOXING=1 /Zs cxxtest.cc
 
   windows-msvc-vs2019:
     runs-on: windows-2019
@@ -246,8 +246,8 @@ jobs:
           arch: ${{ matrix.arch == 'x64' && 'x64' || 'x86' }}
       - name: cxxtest
         run: |
-          cl.exe /std:c++11 /DJS_NAN_BOXING=0 /Zs cxxtest.cc
-          cl.exe /std:c++11 /DJS_NAN_BOXING=1 /Zs cxxtest.cc
+          cl.exe /DJS_NAN_BOXING=0 /Zs cxxtest.cc
+          cl.exe /DJS_NAN_BOXING=1 /Zs cxxtest.cc
 
   windows-clang:
     runs-on: windows-latest
@@ -266,8 +266,8 @@ jobs:
           build\${{matrix.buildType}}\qjs.exe -qd
       - name: cxxtest
         run: |
-          clang-cl.exe /std:c++11 /DJS_NAN_BOXING=0 /Zs cxxtest.cc
-          clang-cl.exe /std:c++11 /DJS_NAN_BOXING=1 /Zs cxxtest.cc
+          clang-cl.exe /DJS_NAN_BOXING=0 /Zs cxxtest.cc
+          clang-cl.exe /DJS_NAN_BOXING=1 /Zs cxxtest.cc
       - name: test
         run: |
           cp build\${{matrix.buildType}}\fib.dll examples\
