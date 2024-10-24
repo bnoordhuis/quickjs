@@ -340,8 +340,13 @@ jobs:
         make stats
         ldd build/qjs
     - name: cxxtest
+      if: ${{ matrix.sys != 'clang64' }}
       run: |
         make cxxtest
+    - name: cxxtest
+      if: ${{ matrix.sys == 'clang64' }}
+      run: |
+        make cxxtest CXX=clang++
     - name: test
       run: |
         make test
