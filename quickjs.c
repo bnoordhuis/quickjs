@@ -18800,9 +18800,17 @@ static const JSOpCode opcode_info[OP_COUNT + (OP_TEMP_END - OP_TEMP_START)] = {
    opcodes overlap with the temporary opcodes which cannot appear in
    the final bytecode. Their description is after the temporary
    opcodes in opcode_info[]. */
-#define short_opcode_info(op)           \
-    opcode_info[(op) >= OP_TEMP_START ? \
-                (op) + (OP_TEMP_END - OP_TEMP_START) : (op)]
+static inline int short_opcode(uint8_t op)
+{
+    static const int disp = OP_TEMP_END - OP_TEMP_START;
+    if (op < OP_TEMP_START)
+        return op;
+    if (op + disp < (int)countof(opcode_info))
+        return op + disp;
+    return -1;
+}
+
+#define short_opcode_info(op) opcode_info[short_opcode(op)]
 
 static __exception int next_token(JSParseState *s);
 
@@ -33651,15 +33659,17 @@ static int bc_put_atom(BCWriterState *s, JSAtom atom)
     return 0;
 }
 
-static void bc_byte_swap(uint8_t *bc_buf, int bc_len)
+static int bc_byte_swap(uint8_t *bc_buf, int bc_len)
 {
-    int pos, len, op, fmt;
+    int pos, len, fmt, op;
 
     pos = 0;
     while (pos < bc_len) {
-        op = bc_buf[pos];
-        len = short_opcode_info(op).size;
-        fmt = short_opcode_info(op).fmt;
+        op = short_opcode(bc_buf[pos]);
+        if (op < 0)
+            return -1;
+        len = opcode_info[op].size;
+        fmt = opcode_info[op].fmt;
         switch(fmt) {
         case OP_FMT_u16:
         case OP_FMT_i16:
@@ -33709,6 +33719,7 @@ static void bc_byte_swap(uint8_t *bc_buf, int bc_len)
         }
         pos += len;
     }
+    return 0;
 }
 
 static BOOL is_ic_op(uint8_t op)
@@ -33719,7 +33730,7 @@ static BOOL is_ic_op(uint8_t op)
 static int JS_WriteFunctionBytecode(BCWriterState *s,
                                     const JSFunctionBytecode *b)
 {
-    int pos, len, bc_len, op;
+    int pos, len, fmt, bc_len, op;
     JSAtom atom;
     uint8_t *bc_buf;
     uint32_t val;
@@ -33732,9 +33743,12 @@ static int JS_WriteFunctionBytecode(BCWriterState *s,
 
     pos = 0;
     while (pos < bc_len) {
-        op = bc_buf[pos];
-        len = short_opcode_info(op).size;
-        switch(short_opcode_info(op).fmt) {
+        op = short_opcode(bc_buf[pos]);
+        if (op < 0)
+            return -1;
+        len = opcode_info[op].size;
+        fmt = opcode_info[op].fmt;
+        switch(fmt) {
         case OP_FMT_atom:
         case OP_FMT_atom_u8:
         case OP_FMT_atom_u16:
@@ -33762,7 +33776,8 @@ static int JS_WriteFunctionBytecode(BCWriterState *s,
     }
 
     if (is_be())
-        bc_byte_swap(bc_buf, bc_len);
+        if (bc_byte_swap(bc_buf, bc_len))
+            goto fail;
 
     dbuf_put(&s->dbuf, bc_buf, bc_len);
 
@@ -34663,7 +34678,7 @@ static int JS_ReadFunctionBytecode(BCReaderState *s, JSFunctionBytecode *b,
                                    int byte_code_offset, uint32_t bc_len)
 {
     uint8_t *bc_buf;
-    int pos, len, op;
+    int pos, len, fmt, op;
     JSAtom atom;
     uint32_t idx;
 
@@ -34673,13 +34688,17 @@ static int JS_ReadFunctionBytecode(BCReaderState *s, JSFunctionBytecode *b,
     b->byte_code_buf = bc_buf;
 
     if (is_be())
-        bc_byte_swap(bc_buf, bc_len);
+        if (bc_byte_swap(bc_buf, bc_len))
+            return -1;
 
     pos = 0;
     while (pos < bc_len) {
-        op = bc_buf[pos];
-        len = short_opcode_info(op).size;
-        switch(short_opcode_info(op).fmt) {
+        op = short_opcode(bc_buf[pos]);
+        if (op < 0)
+            return -1;
+        len = opcode_info[op].size;
+        fmt = opcode_info[op].fmt;
+        switch(fmt) {
         case OP_FMT_atom:
         case OP_FMT_atom_u8:
         case OP_FMT_atom_u16:
