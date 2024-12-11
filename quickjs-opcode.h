@@ -369,6 +369,8 @@ DEF(      get_field_ic, 5, 1, 1, none)
 DEF(     get_field2_ic, 5, 1, 2, none)
 DEF(      put_field_ic, 5, 2, 0, none)
 
+DEF(call_constructor2, 7, 2, 1, npop) /* func new.target args -> ret. arguments are not counted in n_pop */
+
 #undef DEF
 #undef def
 #endif  /* DEF */

@@ -1083,7 +1083,8 @@ static JSValue JS_CallInternal(JSContext *ctx, JSValue func_obj,
 static JSValue JS_CallConstructorInternal(JSContext *ctx,
                                           JSValue func_obj,
                                           JSValue new_target,
-                                          int argc, JSValue *argv, int flags);
+                                          int argc, JSValue *argv, int flags,
+                                          JSAtom name);
 static JSValue JS_CallFree(JSContext *ctx, JSValue func_obj, JSValue this_obj,
                            int argc, JSValue *argv);
 static JSValue JS_InvokeFree(JSContext *ctx, JSValue this_val, JSAtom atom,
@@ -15307,15 +15308,39 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValue func_obj,
                 *sp++ = ret_val;
             }
             BREAK;
-        CASE(OP_call_constructor):
+        CASE(OP_call_constructor2):
             {
+                JSAtom name;
                 call_argc = get_u16(pc);
                 pc += 2;
+                name = JS_ATOM_undefined;
                 call_argv = sp - call_argc;
                 sf->cur_pc = pc;
                 ret_val = JS_CallConstructorInternal(ctx, call_argv[-2],
                                                      call_argv[-1],
-                                                     call_argc, call_argv, 0);
+                                                     call_argc, call_argv, 0,
+                                                     name);
+                if (unlikely(JS_IsException(ret_val)))
+                    goto exception;
+                for(i = -2; i < call_argc; i++)
+                    JS_FreeValue(ctx, call_argv[i]);
+                sp -= call_argc + 2;
+                *sp++ = ret_val;
+            }
+            BREAK;
+        CASE(OP_call_constructor):
+            {
+                JSAtom name;
+                call_argc = get_u16(pc);
+                pc += 2;
+                name = get_u32(pc);
+                pc += 4;
+                call_argv = sp - call_argc;
+                sf->cur_pc = pc;
+                ret_val = JS_CallConstructorInternal(ctx, call_argv[-2],
+                                                     call_argv[-1],
+                                                     call_argc, call_argv, 0,
+                                                     name);
                 if (unlikely(JS_IsException(ret_val)))
                     goto exception;
                 for(i = -2; i < call_argc; i++)
@@ -17534,7 +17559,8 @@ static JSValue js_create_from_ctor(JSContext *ctx, JSValue ctor,
 static JSValue JS_CallConstructorInternal(JSContext *ctx,
                                           JSValue func_obj,
                                           JSValue new_target,
-                                          int argc, JSValue *argv, int flags)
+                                          int argc, JSValue *argv, int flags,
+                                          JSAtom name)
 {
     JSObject *p;
     JSFunctionBytecode *b;
@@ -17545,8 +17571,15 @@ static JSValue JS_CallConstructorInternal(JSContext *ctx,
     if (unlikely(JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT))
         goto not_a_function;
     p = JS_VALUE_GET_OBJ(func_obj);
-    if (unlikely(!p->is_constructor))
-        return JS_ThrowTypeError(ctx, "not a constructor");
+    if (unlikely(!p->is_constructor)) {
+        if (name == JS_ATOM_NULL) {
+            return JS_ThrowTypeError(ctx, "not a constructor");
+        } else {
+            char s[ATOM_GET_STR_BUF_SIZE];
+            JS_AtomGetStr(ctx, s, sizeof(s), name);
+            return JS_ThrowTypeError(ctx, "%s is not a constructor", s);
+        }
+    }
     if (unlikely(p->class_id != JS_CLASS_BYTECODE_FUNCTION)) {
         JSClassCall *call_func;
         call_func = ctx->rt->class_array[p->class_id].call;
@@ -17585,7 +17618,8 @@ JSValue JS_CallConstructor2(JSContext *ctx, JSValue func_obj,
 {
     return JS_CallConstructorInternal(ctx, func_obj, new_target,
                                       argc, argv,
-                                      JS_CALL_FLAG_COPY_ARGV);
+                                      JS_CALL_FLAG_COPY_ARGV,
+                                      JS_ATOM_NULL);
 }
 
 JSValue JS_CallConstructor(JSContext *ctx, JSValue func_obj,
@@ -17593,7 +17627,8 @@ JSValue JS_CallConstructor(JSContext *ctx, JSValue func_obj,
 {
     return JS_CallConstructorInternal(ctx, func_obj, func_obj,
                                       argc, argv,
-                                      JS_CALL_FLAG_COPY_ARGV);
+                                      JS_CALL_FLAG_COPY_ARGV,
+                                      JS_ATOM_NULL);
 }
 
 JSValue JS_Invoke(JSContext *ctx, JSValue this_val, JSAtom atom,
@@ -23433,6 +23468,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
     FuncCallType call_type;
     int optional_chaining_label;
     BOOL accept_lparen = (parse_flags & PF_POSTFIX_CALL) != 0;
+    JSAtom name = JS_ATOM_NULL;
 
     call_type = FUNC_CALL_NORMAL;
     switch(s->token.val) {
@@ -23629,9 +23665,14 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
             if (s->token.val != '(') {
                 /* new operator on an object */
                 emit_op(s, OP_dup);
-                emit_op(s, OP_call_constructor);
+                emit_op(s, OP_call_constructor2);
+                emit_atom(s, JS_ATOM_NULL);
                 emit_u16(s, 0);
             } else {
+                JSFunctionDef *fd = s->cur_func;
+                uint8_t *pc = &fd->byte_code.buf[fd->last_opcode_pos];
+                if (*pc == OP_scope_get_var)
+                    name = get_u32(pc + 1);
                 call_type = FUNC_CALL_NEW;
             }
         }
@@ -23952,7 +23993,8 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                     break;
                 default:
                     if (call_type == FUNC_CALL_SUPER_CTOR) {
-                        emit_op(s, OP_call_constructor);
+                        emit_op(s, OP_call_constructor2);
+                        emit_atom(s, JS_ATOM_NULL);
                         emit_u16(s, arg_count);
 
                         /* set the 'this' value */
@@ -23963,7 +24005,8 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
 
                         emit_class_field_init(s);
                     } else if (call_type == FUNC_CALL_NEW) {
-                        emit_op(s, OP_call_constructor);
+                        emit_op(s, OP_call_constructor2);
+                        emit_atom(s, name);
                         emit_u16(s, arg_count);
                     } else {
                         emit_op(s, OP_call);
