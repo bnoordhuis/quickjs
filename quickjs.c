@@ -14825,7 +14825,7 @@ typedef enum {
 #define FUNC_RET_YIELD      1
 #define FUNC_RET_YIELD_STAR 2
 
-#if defined(DUMP_BYTECODE_FINAL) || \
+#if 1 || defined(DUMP_BYTECODE_FINAL) || \
     defined(DUMP_BYTECODE_PASS2) || \
     defined(DUMP_BYTECODE_PASS1) || \
     defined(DUMP_BYTECODE_STACK) || \
@@ -14839,6 +14839,62 @@ static void dump_single_byte_code(JSContext *ctx, const uint8_t *pc,
                                   JSFunctionBytecode *b, int start_pos);
 static void print_func_name(JSFunctionBytecode *b);
 #endif
+
+typedef struct JSOpCode {
+#ifdef DUMP_BYTECODE
+    const char *name;
+#endif
+    uint8_t size; /* in bytes */
+    /* the opcodes remove n_pop items from the top of the stack, then
+       pushes n_push items */
+    uint8_t n_pop;
+    uint8_t n_push;
+    uint8_t fmt;
+    uint64_t count;
+    uint64_t cycles;
+} JSOpCode;
+
+static JSOpCode opcode_info[OP_COUNT + (OP_TEMP_END - OP_TEMP_START)] = {
+#define FMT(f)
+#ifdef DUMP_BYTECODE
+#define DEF(id, size, n_pop, n_push, f) { #id, size, n_pop, n_push, OP_FMT_ ## f },
+#else
+#define DEF(id, size, n_pop, n_push, f) { size, n_pop, n_push, OP_FMT_ ## f },
+#endif
+#include "quickjs-opcode.h"
+#undef DEF
+#undef FMT
+};
+
+/* After the final compilation pass, short opcodes are used. Their
+   opcodes overlap with the temporary opcodes which cannot appear in
+   the final bytecode. Their description is after the temporary
+   opcodes in opcode_info[]. */
+#define short_opcode_info(op)           \
+    opcode_info[(op) >= OP_TEMP_START ? \
+                (op) + (OP_TEMP_END - OP_TEMP_START) : (op)]
+
+__attribute__((visibility("default"))) void js_shutdown(void)
+{
+    JSOpCode *o;
+
+    printf("create table x (c int, t int, s varchar);\n");
+    for (o = opcode_info; o != endof(opcode_info); o++)
+        if (o->count)
+            printf("insert into x (c,t,s) values (%lu,%lu,'%s');\n", o->count, o->cycles, o->name);
+    printf("-- unused:");
+    for (o = opcode_info; o != endof(opcode_info); o++)
+        if (!o->count)
+            printf(" %s", o->name);
+    printf("\n");
+}
+
+static inline uint64_t rdtsc(void)
+{
+    uint32_t ax, dx;
+    __asm__ __volatile__("rdtsc" : "=a"(ax), "=d"(dx));
+    return ax | (uint64_t)dx << 32;
+}
 
 /* argv[] is modified if (flags & JS_CALL_FLAG_COPY_ARGV) = 0. */
 static JSValue JS_CallInternal(JSContext *caller_ctx, JSValue func_obj,
@@ -14864,6 +14920,9 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValue func_obj,
 #define DUMP_BYTECODE_OR_DONT(pc)
 #endif
 
+#undef DUMP_BYTECODE_OR_DONT
+#define DUMP_BYTECODE_OR_DONT(pc) \
+
 #if !DIRECT_DISPATCH
 #define SWITCH(pc)      DUMP_BYTECODE_OR_DONT(pc) switch (opcode = *pc++)
 #define CASE(op)        case op
@@ -14876,10 +14935,18 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValue func_obj,
 #include "quickjs-opcode.h"
         [ OP_COUNT ... 255 ] = &&case_default
     };
-#define SWITCH(pc)      DUMP_BYTECODE_OR_DONT(pc) __extension__ ({ goto *dispatch_table[opcode = *pc++]; });
+    uint64_t _tsc;
+    uint8_t _op;
+#define SWITCH(pc)      \
+    _op = *pc;          \
+    short_opcode_info(_op).count++; \
+    _tsc = rdtsc(); \
+    DUMP_BYTECODE_OR_DONT(pc) __extension__ ({ goto *dispatch_table[opcode = *pc++]; });
 #define CASE(op)        case_ ## op
 #define DEFAULT         case_default
-#define BREAK           SWITCH(pc)
+#define BREAK           \
+    short_opcode_info(_op).cycles += rdtsc() - _tsc; \
+    SWITCH(pc)
 #endif
 
     if (js_poll_interrupts(caller_ctx))
@@ -18847,38 +18914,6 @@ typedef struct JSParseState {
     BOOL is_module; /* parsing a module */
     BOOL allow_html_comments;
 } JSParseState;
-
-typedef struct JSOpCode {
-#ifdef DUMP_BYTECODE
-    const char *name;
-#endif
-    uint8_t size; /* in bytes */
-    /* the opcodes remove n_pop items from the top of the stack, then
-       pushes n_push items */
-    uint8_t n_pop;
-    uint8_t n_push;
-    uint8_t fmt;
-} JSOpCode;
-
-static const JSOpCode opcode_info[OP_COUNT + (OP_TEMP_END - OP_TEMP_START)] = {
-#define FMT(f)
-#ifdef DUMP_BYTECODE
-#define DEF(id, size, n_pop, n_push, f) { #id, size, n_pop, n_push, OP_FMT_ ## f },
-#else
-#define DEF(id, size, n_pop, n_push, f) { size, n_pop, n_push, OP_FMT_ ## f },
-#endif
-#include "quickjs-opcode.h"
-#undef DEF
-#undef FMT
-};
-
-/* After the final compilation pass, short opcodes are used. Their
-   opcodes overlap with the temporary opcodes which cannot appear in
-   the final bytecode. Their description is after the temporary
-   opcodes in opcode_info[]. */
-#define short_opcode_info(op)           \
-    opcode_info[(op) >= OP_TEMP_START ? \
-                (op) + (OP_TEMP_END - OP_TEMP_START) : (op)]
 
 static __exception int next_token(JSParseState *s);
 

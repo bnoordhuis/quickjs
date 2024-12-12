@@ -742,6 +742,8 @@ start:
                best[1] + best[2] + best[3] + best[4],
                best[1], best[2], best[3], best[4]);
     }
+    extern void js_shutdown(void);
+    js_shutdown();
     return 0;
  fail:
     js_std_free_handlers(rt);
