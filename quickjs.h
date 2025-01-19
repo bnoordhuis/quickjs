@@ -404,6 +404,8 @@ JS_EXTERN void JS_AddIntrinsicEval(JSContext *ctx);
 JS_EXTERN void JS_AddIntrinsicRegExpCompiler(JSContext *ctx);
 JS_EXTERN void JS_AddIntrinsicRegExp(JSContext *ctx);
 JS_EXTERN void JS_AddIntrinsicJSON(JSContext *ctx);
+// still experimental; has to be added explicitly
+JS_EXTERN void JS_AddIntrinsicWASM(JSContext *ctx);
 JS_EXTERN void JS_AddIntrinsicProxy(JSContext *ctx);
 JS_EXTERN void JS_AddIntrinsicMapSet(JSContext *ctx);
 JS_EXTERN void JS_AddIntrinsicTypedArrays(JSContext *ctx);

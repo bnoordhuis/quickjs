@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <setjmp.h>
 #include <inttypes.h>
 #include <string.h>
 #include <assert.h>
@@ -158,6 +159,7 @@ enum {
     JS_CLASS_WEAK_REF,
     JS_CLASS_FINALIZATION_REGISTRY,
     JS_CLASS_CALL_SITE,
+    JS_CLASS_WASM_MODULE,       /* u.opaque */
 
     JS_CLASS_INIT_COUNT, /* last entry for predefined classes */
 };
@@ -848,6 +850,15 @@ struct JSModuleDef {
     JSValue meta_obj; /* for import.meta */
 };
 
+typedef struct JSWasmModule
+{
+    DynBuf bytes;
+    DynBuf types;
+    DynBuf functions;
+    DynBuf exports;
+    DynBuf code;
+} JSWasmModule;
+
 typedef struct JSJobEntry {
     struct list_head link;
     JSContext *ctx;
@@ -1306,6 +1317,9 @@ static JSValue js_new_callsite(JSContext *ctx, JSCallSiteData *csd);
 static void js_new_callsite_data(JSContext *ctx, JSCallSiteData *csd, JSStackFrame *sf);
 static void js_new_callsite_data2(JSContext *ctx, JSCallSiteData *csd, const char *filename, int line_num, int col_num);
 static void _JS_AddIntrinsicCallSite(JSContext *ctx);
+static void js_wasm_module_mark(JSRuntime *rt, JSValue val,
+                                JS_MarkFunc *mark_func);
+static void js_wasm_module_finalizer(JSRuntime *rt, JSValue val);
 
 static void JS_SetOpaqueInternal(JSValue obj, void *opaque);
 
@@ -1732,6 +1746,7 @@ static JSClassShortDef const js_std_class_def[] = {
     { JS_ATOM_String_Iterator, js_array_iterator_finalizer, js_array_iterator_mark }, /* JS_CLASS_STRING_ITERATOR */
     { JS_ATOM_RegExp_String_Iterator, js_regexp_string_iterator_finalizer, js_regexp_string_iterator_mark }, /* JS_CLASS_REGEXP_STRING_ITERATOR */
     { JS_ATOM_Generator, js_generator_finalizer, js_generator_mark }, /* JS_CLASS_GENERATOR */
+    { JS_ATOM_Module, js_wasm_module_finalizer, js_wasm_module_mark }, /* JS_CLASS_WASM_MODULE */
 };
 
 static int init_class_range(JSRuntime *rt, JSClassShortDef const *tab,
@@ -2326,6 +2341,7 @@ JSContext *JS_NewContext(JSRuntime *rt)
     JS_AddIntrinsicEval(ctx);
     JS_AddIntrinsicRegExp(ctx);
     JS_AddIntrinsicJSON(ctx);
+    //JS_AddIntrinsicWASM(ctx);
     JS_AddIntrinsicProxy(ctx);
     JS_AddIntrinsicMapSet(ctx);
     JS_AddIntrinsicTypedArrays(ctx);
@@ -6516,6 +6532,26 @@ static int get_leb128(uint32_t *pval, const uint8_t *buf,
     uint32_t v, a, i;
     v = 0;
     for(i = 0; i < 5; i++) {
+        if (unlikely(ptr >= buf_end))
+            break;
+        a = *ptr++;
+        v |= (a & 0x7f) << (i * 7);
+        if (!(a & 0x80)) {
+            *pval = v;
+            return ptr - buf;
+        }
+    }
+    *pval = 0;
+    return -1;
+}
+
+static int get_leb128_64(uint64_t *pval, const uint8_t *buf,
+                         const uint8_t *buf_end)
+{
+    const uint8_t *ptr = buf;
+    uint64_t v, a, i;
+    v = 0;
+    for(i = 0; i < 10; i++) {
         if (unlikely(ptr >= buf_end))
             break;
         a = *ptr++;
@@ -45712,6 +45748,626 @@ void JS_AddIntrinsicJSON(JSContext *ctx)
 {
     /* add JSON as autoinit object */
     JS_SetPropertyFunctionList(ctx, ctx->global_obj, js_json_obj, countof(js_json_obj));
+}
+
+/* WebAssembly */
+
+static void js_wasm_module_fini(JSRuntime *rt, JSWasmModule *m)
+{
+    dbuf_free(&m->bytes);
+    dbuf_free(&m->types);
+    dbuf_free(&m->functions);
+    dbuf_free(&m->exports);
+    dbuf_free(&m->code);
+    js_free_rt(rt, m);
+}
+
+static JSWasmModule *js_wasm_module_new(JSContext *ctx, const uint8_t *buf,
+                                        size_t len)
+{
+    JSWasmModule *m;
+
+    m = js_mallocz(ctx, sizeof(*m));
+    if (!m)
+        return NULL;
+    js_dbuf_init(ctx, &m->bytes);
+    js_dbuf_init(ctx, &m->types);
+    js_dbuf_init(ctx, &m->functions);
+    js_dbuf_init(ctx, &m->exports);
+    js_dbuf_init(ctx, &m->code);
+    if (dbuf_put(&m->bytes, buf, len)) {
+        js_wasm_module_fini(ctx->rt, m);
+        return NULL;
+    }
+    return m;
+}
+
+static void js_wasm_module_mark(JSRuntime *rt, JSValue val,
+                                JS_MarkFunc *mark_func)
+{
+    // nothing to do yet
+}
+
+static void js_wasm_module_finalizer(JSRuntime *rt, JSValue val)
+{
+    JSWasmModule *m;
+
+    m = JS_GetOpaque(val, JS_CLASS_WASM_MODULE);
+    js_wasm_module_fini(rt, m);
+}
+
+static int js_wasm_trunc(JSContext *ctx)
+{
+    JS_ThrowTypeError(ctx, "truncated wasm file");
+    return -1;
+}
+
+typedef struct JSWasmParseState
+{
+    const uint8_t *cur, *end;
+    JSWasmModule *module;
+    JSContext *ctx;
+    jmp_buf jmpbuf;
+} JSWasmParseState;
+
+static uint32_t js_wasm_get_pos(JSWasmParseState *s)
+{
+    return s->cur - s->module->bytes.buf;
+}
+
+static _Noreturn void js_wasm_throw(JSWasmParseState *s, const char *str)
+{
+    JS_ThrowTypeError(s->ctx, "%s", str);
+    longjmp(s->jmpbuf, 1);
+}
+
+static uint8_t js_wasm_get_u8(JSWasmParseState *s)
+{
+    if (s->cur < s->end)
+        return *s->cur++;
+    js_wasm_throw(s, "truncated input");
+    return 0; // pacify compiler
+}
+
+static uint32_t js_wasm_get_u32(JSWasmParseState *s)
+{
+    uint32_t v;
+    int r;
+
+    r = get_leb128(&v, s->cur, s->end);
+    if (r < 0)
+        js_wasm_throw(s, "truncated input");
+    s->cur += r;
+    return v;
+}
+
+static uint64_t js_wasm_get_u64(JSWasmParseState *s)
+{
+    uint64_t v;
+    int r;
+
+    r = get_leb128_64(&v, s->cur, s->end);
+    if (r < 0)
+        js_wasm_throw(s, "truncated input");
+    s->cur += r;
+    return v;
+}
+
+static void js_wasm_put_u32(JSWasmParseState *s, DynBuf *b, uint32_t v)
+{
+    if (dbuf_put_u32(b, v))
+        longjmp(s->jmpbuf, 1); // OOM exception pending
+}
+
+static void js_wasm_parse_types_section(JSWasmParseState *s)
+{
+    uint32_t i, j, nargs, nret, ntypes;
+    uint8_t b;
+
+    ntypes = js_wasm_get_u32(s);
+    for (i = 0; i < ntypes; i++) {
+        js_wasm_put_u32(s, &s->module->types, js_wasm_get_pos(s));
+        b = js_wasm_get_u8(s);
+        if (b != 0x60)
+            js_wasm_throw(s, "bad function type");
+        nargs = js_wasm_get_u32(s);
+        for (j = 0; j < nargs; j++) {
+            b = js_wasm_get_u8(s);
+            switch (b) {
+            default:
+                js_wasm_throw(s, "bad argument type");
+            case 0x60: // func
+            case 0x7C: // f64
+            case 0x7D: // f32
+            case 0x7E: // i64
+            case 0x7F: // i32
+                break;
+            }
+        }
+        nret = js_wasm_get_u32(s);
+        if (nret > 1)
+            js_wasm_throw(s, "TODO multiple return values");
+        if (nret == 1) {
+            b = js_wasm_get_u8(s);
+            switch (b) {
+            default:
+                js_wasm_throw(s, "bad return type");
+            case 0x60: // func
+            case 0x7C: // f64
+            case 0x7D: // f32
+            case 0x7E: // i64
+            case 0x7F: // i32
+                break;
+            }
+        }
+    }
+}
+
+static void js_wasm_parse_functions_section(JSWasmParseState *s)
+{
+    JSWasmModule *m = s->module;
+    uint32_t i, n, idx;
+
+    n = js_wasm_get_u32(s);
+    for (i = 0; i < n; i++) {
+        idx = js_wasm_get_u32(s);
+        if (idx > m->types.size/sizeof(uint32_t))
+            js_wasm_throw(s, "bad function type index");
+        js_wasm_put_u32(s, &m->functions, idx);
+    }
+}
+
+static void js_wasm_parse_exports_section(JSWasmParseState *s)
+{
+    uint32_t i, n, idx, namelen;
+    const uint8_t *name;
+    uint8_t typ;
+
+    n = js_wasm_get_u32(s);
+    for (i = 0; i < n; i++) {
+        js_wasm_put_u32(s, &s->module->exports, js_wasm_get_pos(s));
+        namelen = js_wasm_get_u32(s);
+        if (namelen > s->end - s->cur)
+            js_wasm_throw(s, "truncated input");
+        name = s->cur;
+        s->cur += namelen;
+        typ = js_wasm_get_u8(s);
+        idx = js_wasm_get_u32(s);
+        switch (typ) {
+        default:
+            js_wasm_throw(s, "bad export type");
+        case 0: // function
+        case 1: // table
+        case 2: // memory
+        case 3: // global
+            break;
+        }
+    }
+}
+
+static void js_wasm_parse_code_section(JSWasmParseState *s)
+{
+    uint32_t i, j, k, n, count, len, nlocals;
+    const uint8_t *mark;
+    uint8_t b;
+
+    n = js_wasm_get_u32(s);
+    for (i = 0; i < n; i++) {
+        js_wasm_put_u32(s, &s->module->code, js_wasm_get_pos(s));
+        len = js_wasm_get_u32(s);
+        mark = s->cur;
+        nlocals = js_wasm_get_u32(s);
+        for (j = 0; j < nlocals; j++) {
+            count = js_wasm_get_u32(s);
+            b = js_wasm_get_u8(s);
+            switch (b) {
+            default:
+                js_wasm_throw(s, "bad local type");
+            case 0x60: // func
+            case 0x7C: // f64
+            case 0x7D: // f32
+            case 0x7E: // i64
+            case 0x7F: // i32
+                break;
+            }
+        }
+        for (j = s->cur - mark; j < len; j = s->cur - mark) {
+            b = js_wasm_get_u8(s);
+            switch (b) {
+            default:
+                js_wasm_throw(s, "bad opcde");
+            case 0x00: // unreachable
+            case 0x01: // nop
+            case 0x02: // block
+            case 0x03: // loop
+            case 0x04: // if
+            case 0x05: // else
+            case 0x0B: // end
+            case 0x0C: // br
+            case 0x0D: // br_if
+            case 0x0E: // br_table
+            case 0x0F: // return
+            case 0x10: // call
+            case 0x11: // call_indirect
+            case 0x1A: // drop
+            case 0x1B: // select
+            case 0x1C: // select (typed)
+            case 0x20: // get_local
+            case 0x21: // set_local
+            case 0x22: // tee_local
+            case 0x23: // get_global
+            case 0x24: // set_global
+            case 0x28: // i32.load
+            case 0x29: // i64.load
+            case 0x2A: // f32.load
+            case 0x2B: // f64.load
+            case 0x2C: // i32.load8_s
+            case 0x2D: // i32.load8_u
+            case 0x2E: // i32.load16_s
+            case 0x2F: // i32.load16_u
+            case 0x30: // i64.load8_s
+            case 0x31: // i64.load8_u
+            case 0x32: // i64.load16_s
+            case 0x33: // i64.load16_u
+            case 0x34: // i64.load32_s
+            case 0x35: // i64.load32_u
+            case 0x36: // i32.store
+            case 0x37: // i64.store
+            case 0x38: // f32.store
+            case 0x39: // f64.store
+            case 0x3A: // i32.store8
+            case 0x3B: // i32.store16
+            case 0x3C: // i64.store8
+            case 0x3D: // i64.store16
+            case 0x3E: // i64.store32
+            case 0x3F: // current_memory
+            case 0x40: // grow_memory
+            case 0x41: // i32.const
+            case 0x42: // i64.const
+            case 0x43: // f32.const
+            case 0x44: // f64.const
+            case 0x45: // i32.eqz
+            case 0x46: // i32.eq
+            case 0x47: // i32.ne
+            case 0x48: // i32.lt_s
+            case 0x49: // i32.lt_u
+            case 0x4A: // i32.gt_s
+            case 0x4B: // i32.gt_u
+            case 0x4C: // i32.le_s
+            case 0x4D: // i32.le_u
+            case 0x4E: // i32.ge_s
+            case 0x4F: // i32.ge_u
+            case 0x50: // i64.eqz
+            case 0x51: // i64.eq
+            case 0x52: // i64.ne
+            case 0x53: // i64.lt_s
+            case 0x54: // i64.lt_u
+            case 0x55: // i64.gt_s
+            case 0x56: // i64.gt_u
+            case 0x57: // i64.le_s
+            case 0x58: // i64.le_u
+            case 0x59: // i64.ge_s
+            case 0x5A: // i64.ge_u
+            case 0x5B: // f32.eq
+            case 0x5C: // f32.ne
+            case 0x5D: // f32.lt
+            case 0x5E: // f32.gt
+            case 0x5F: // f32.le
+            case 0x60: // f32.ge
+            case 0x61: // f64.eq
+            case 0x62: // f64.ne
+            case 0x63: // f64.lt
+            case 0x64: // f64.gt
+            case 0x65: // f64.le
+            case 0x66: // f64.ge
+            case 0x67: // i32.clz
+            case 0x68: // i32.ctz
+            case 0x69: // i32.popcnt
+            case 0x6A: // i32.add
+            case 0x6B: // i32.sub
+            case 0x6C: // i32.mul
+            case 0x6D: // i32.div_s
+            case 0x6E: // i32.div_u
+            case 0x6F: // i32.rem_s
+            case 0x70: // i32.rem_u
+            case 0x71: // i32.and
+            case 0x72: // i32.or
+            case 0x73: // i32.xor
+            case 0x74: // i32.shl
+            case 0x75: // i32.shr_s
+            case 0x76: // i32.shr_u
+            case 0x77: // i32.rotl
+            case 0x78: // i32.rotr
+            case 0x79: // i64.clz
+            case 0x7A: // i64.ctz
+            case 0x7B: // i64.popcnt
+            case 0x7C: // i64.add
+            case 0x7D: // i64.sub
+            case 0x7E: // i64.mul
+            case 0x7F: // i64.div_s
+            case 0x80: // i64.div_u
+            case 0x81: // i64.rem_s
+            case 0x82: // i64.rem_u
+            case 0x83: // i64.and
+            case 0x84: // i64.or
+            case 0x85: // i64.xor
+            case 0x86: // i64.shl
+            case 0x87: // i64.shr_s
+            case 0x88: // i64.shr_u
+            case 0x89: // i64.rotl
+            case 0x8A: // i64.rotr
+            case 0x8B: // f32.abs
+            case 0x8C: // f32.neg
+            case 0x8D: // f32.ceil
+            case 0x8E: // f32.floor
+            case 0x8F: // f32.trunc
+            case 0x90: // f32.nearest
+            case 0x91: // f32.sqrt
+            case 0x92: // f32.add
+            case 0x93: // f32.sub
+            case 0x94: // f32.mul
+            case 0x95: // f32.div
+            case 0x96: // f32.min
+            case 0x97: // f32.max
+            case 0x98: // f32.copysign
+            case 0x99: // f64.abs
+            case 0x9A: // f64.neg
+            case 0x9B: // f64.ceil
+            case 0x9C: // f64.floor
+            case 0x9D: // f64.trunc
+            case 0x9E: // f64.nearest
+            case 0x9F: // f64.sqrt
+            case 0xA0: // f64.add
+            case 0xA1: // f64.sub
+            case 0xA2: // f64.mul
+            case 0xA3: // f64.div
+            case 0xA4: // f64.min
+            case 0xA5: // f64.max
+            case 0xA6: // f64.copysign
+            case 0xA7: // i32.wrap/i64
+            case 0xA8: // i32.trunc_s/f32
+            case 0xA9: // i32.trunc_u/f32
+            case 0xAA: // i32.trunc_s/f64
+            case 0xAB: // i32.trunc_u/f64
+            case 0xAC: // i64.extend_s/i32
+            case 0xAD: // i64.extend_u/i32
+            case 0xAE: // i64.trunc_s/f32
+            case 0xAF: // i64.trunc_u/f32
+            case 0xB0: // i64.trunc_s/f64
+            case 0xB1: // i64.trunc_u/f64
+            case 0xB2: // f32.convert_s/i32
+            case 0xB3: // f32.convert_u/i32
+            case 0xB4: // f32.convert_s/i64
+            case 0xB5: // f32.convert_u/i64
+            case 0xB6: // f32.demote/f64
+            case 0xB7: // f64.convert_s/i32
+            case 0xB8: // f64.convert_u/i32
+            case 0xB9: // f64.convert_s/i64
+            case 0xBA: // f64.convert_u/i64
+            case 0xBB: // f64.promote/f32
+            case 0xBC: // i32.reinterpret/f32
+            case 0xBD: // i64.reinterpret/f64
+            case 0xBE: // f32.reinterpret/i32
+            case 0xBF: // f64.reinterpret/i64
+            case 0xC0: // i32.extend8_s
+            case 0xC1: // i32.extend16_s
+            case 0xC2: // i64.extend8_s
+            case 0xC3: // i64.extend16_s
+            case 0xC4: // i64.extend32_s
+                break;
+            }
+            switch (b) {
+            case 0x0E: // br_table
+                js_wasm_throw(s, "TODO br_table");
+                break;
+            case 0x11: // call_indirect
+                js_wasm_throw(s, "TODO call_indirect");
+                break;
+            case 0x1C: // select (typed)
+                js_wasm_throw(s, "TODO select (typed)");
+                break;
+            case 0x02: // block
+            case 0x03: // loop
+            case 0x04: // if
+            case 0x0C: // br
+            case 0x0D: // br_if
+            case 0x10: // call
+            case 0x20: // get_local
+            case 0x21: // set_local
+            case 0x22: // tee_local
+            case 0x23: // get_global
+            case 0x24: // set_global
+            case 0x41: // i32.const
+            case 0x43: // f32.const
+                js_wasm_get_u32(s);
+                break;
+            case 0x42: // i64.const
+            case 0x44: // f64.const
+                js_wasm_get_u64(s);
+                break;
+            }
+            // 0x28 ... 0x2B => i32.load    ... f64.load
+            // 0x2C ... 0x2F => i32.load8_s ... i32.load16_u
+            // 0x30 ... 0x35 => i64.load8_s ... i64.load32_u
+            // 0x36 ... 0x39 => i32.store   ... f64.store
+            // 0x3A ... 0x3B => i32.store8  ... i32.store16
+            if (b >= 0x28 && b <= 0x3B) {
+                js_wasm_get_u32(s); // flags
+                js_wasm_get_u32(s); // offset
+            }
+        }
+        if (len != s->cur - mark)
+            js_wasm_throw(s, "bad code section");
+    }
+}
+
+static void js_wasm_parse_sections(JSWasmParseState *s)
+{
+    uint8_t sec_id, last_sec_id = 0;
+    const uint8_t *mark;
+    uint32_t len;
+
+    while (s->cur < s->end) {
+        sec_id = js_wasm_get_u8(s);
+        if (sec_id > 0) {
+            // sections are in ascending order
+            if (last_sec_id >= sec_id)
+                js_wasm_throw(s, "bad section order");
+            last_sec_id = sec_id;
+        }
+        len = js_wasm_get_u32(s);
+        mark = s->cur;
+        switch (sec_id) {
+        default:
+            js_wasm_throw(s, "bad section");
+        case 0: // custom, usually debug info; skip
+            break;
+        case 1: // types
+            js_wasm_parse_types_section(s);
+            break;
+        case 3: // functions
+            js_wasm_parse_functions_section(s);
+            break;
+        case 7: // exports
+            js_wasm_parse_exports_section(s);
+            break;
+        case 10: // code
+            js_wasm_parse_code_section(s);
+            break;
+        }
+        if (len != s->cur - mark)
+            js_wasm_throw(s, "section decode error");
+    }
+}
+
+static JSValue js_wasm_parse(JSContext *ctx, const uint8_t *buf, size_t len)
+{
+    static const uint8_t magic[8] = {0,'a','s','m',1,0,0,0};
+    JSWasmParseState s;
+    JSWasmModule *m;
+    JSValue obj;
+
+    if (len < sizeof(magic))
+        return JS_ThrowTypeError(ctx, "truncated input");
+    if (memcmp(buf, magic, sizeof(magic)))
+        return JS_ThrowTypeError(ctx, "not a wasm file");
+    buf += sizeof(magic);
+    len -= sizeof(magic);
+    m = js_wasm_module_new(ctx, buf, len);
+    if (!m)
+        return JS_EXCEPTION;
+    if (len) {
+        s = (JSWasmParseState){
+            .module = m,
+            .ctx    = ctx,
+            .cur    = &m->bytes.buf[0],
+            .end    = &m->bytes.buf[m->bytes.size],
+        };
+        if (setjmp(s.jmpbuf))
+            goto fail;
+        js_wasm_parse_sections(&s); // longjmps on error
+    }
+    obj = JS_NewObjectClass(ctx, JS_CLASS_WASM_MODULE);
+    if (JS_IsException(obj))
+        goto fail;
+    JS_SetOpaqueInternal(obj, m);
+    return obj;
+fail:
+    js_wasm_module_fini(ctx->rt, m);
+    return JS_EXCEPTION;
+}
+
+static JSValue js_wasm_module_constructor(JSContext *ctx, JSValue this_val,
+                                          int argc, JSValue *argv)
+{
+    return JS_UNDEFINED;
+}
+
+static JSValue js_wasm_instance_constructor(JSContext *ctx, JSValue this_val,
+                                            int argc, JSValue *argv)
+{
+    return JS_UNDEFINED;
+}
+
+static JSValue js_wasm_instantiate(JSContext *ctx, JSValue this_val,
+                                   int argc, JSValue *argv, int instantiate)
+{
+    uint32_t offset, length;
+    JSArrayBuffer *abuf;
+    JSTypedArray *ta;
+    JSObject *p;
+    JSValue val;
+
+    val = argv[0];
+    if (JS_IsArrayBuffer(val)) {
+        abuf = JS_GetOpaque2(ctx, val, JS_CLASS_ARRAY_BUFFER);
+        if (!abuf)
+            goto exception;
+        offset = 0;
+        length = abuf->byte_length;
+    } else {
+        p = get_typed_array(ctx, val);
+        if (!p)
+            goto exception;
+        if (typed_array_is_oob(p)) {
+            JS_ThrowTypeErrorArrayBufferOOB(ctx);
+            goto exception;
+        }
+        ta = p->u.typed_array;
+        abuf = ta->buffer->u.array_buffer;
+        offset = ta->offset;
+        length = ta->length;
+    }
+    if (abuf->detached) {
+        JS_ThrowTypeErrorDetachedArrayBuffer(ctx);
+        goto exception;
+    }
+    if (instantiate) {
+        if (argc > 1) {
+            // TODO argv[1] is imports
+        }
+        if (argc > 2) {
+            // TODO argv[2] is compileOptions
+        }
+    } else {
+        if (argc > 1) {
+            // TODO argv[1] is compileOptions
+        }
+    }
+    val = js_wasm_parse(ctx, &abuf->data[offset], length);
+    if (JS_IsException(val))
+        goto exception;
+    if (instantiate) {
+        JSValue obj = JS_NewObject(ctx);
+        if (JS_IsException(obj))
+            goto exception;
+        if (JS_SetProperty(ctx, obj, JS_ATOM_module, val) < 0) {
+            JS_FreeValue(ctx, obj);
+            goto exception;
+        }
+        val = obj;
+    }
+    return js_promise_resolve(ctx, ctx->promise_ctor, 1, &val, /*reject*/0);
+exception:
+    JSValue exc = JS_GetException(ctx);
+    return js_promise_resolve(ctx, ctx->promise_ctor, 1, &exc, /*reject*/1);
+}
+
+static const JSCFunctionListEntry js_wasm_funcs[] = {
+    JS_CFUNC_DEF("Module", 1, js_wasm_module_constructor ),
+    JS_CFUNC_DEF("Instance", 1, js_wasm_instance_constructor ),
+    JS_CFUNC_MAGIC_DEF("compile", 1, js_wasm_instantiate, 0 ),
+    JS_CFUNC_MAGIC_DEF("instantiate", 1, js_wasm_instantiate, 1 ),
+    JS_PROP_STRING_DEF("[Symbol.toStringTag]", "WebAssembly", JS_PROP_CONFIGURABLE ),
+};
+
+static const JSCFunctionListEntry js_wasm_obj[] = {
+    JS_OBJECT_DEF("WebAssembly", js_wasm_funcs, countof(js_wasm_funcs), JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE ),
+};
+
+void JS_AddIntrinsicWASM(JSContext *ctx)
+{
+    JS_SetPropertyFunctionList(ctx, ctx->global_obj, js_wasm_obj, countof(js_wasm_obj));
 }
 
 /* Reflect */

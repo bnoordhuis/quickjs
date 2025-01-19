@@ -56,6 +56,7 @@ static const int trailer_size = TRAILER_SIZE;
 
 static int qjs__argc;
 static char **qjs__argv;
+static int enable_wasm;
 
 
 static bool is_standalone(const char *exe)
@@ -217,6 +218,8 @@ static JSContext *JS_NewCustomContext(JSRuntime *rt)
     ctx = JS_NewContext(rt);
     if (!ctx)
         return NULL;
+    if (enable_wasm)
+        JS_AddIntrinsicWASM(ctx);
     /* system modules */
     js_init_module_std(ctx, "qjs:std");
     js_init_module_os(ctx, "qjs:os");
@@ -375,6 +378,7 @@ void help(void)
            "-I  --include file include an additional file\n"
            "    --std          make 'std', 'os' and 'bjson' available to script\n"
            "-T  --trace        trace memory allocation\n"
+           "-W                 enable experimental WebAssembly support\n"
            "-d  --dump         dump the memory usage stats\n"
            "-D  --dump-flags   flags for dumping debug data (see DUMP_* defines)\n"
            "-c  --compile FILE compile the given JS file as a standalone executable\n"
@@ -500,6 +504,10 @@ int main(int argc, char **argv)
             }
             if (opt == 'T' || !strcmp(longopt, "trace")) {
                 trace_memory++;
+                continue;
+            }
+            if (opt == 'W') {
+                enable_wasm++;
                 continue;
             }
             if (!strcmp(longopt, "std")) {
