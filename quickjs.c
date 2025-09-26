@@ -546,7 +546,7 @@ typedef enum {
     JS_ATOM_KIND_PRIVATE,
 } JSAtomKindEnum;
 
-#define JS_ATOM_HASH_MASK  ((1 << 30) - 1)
+#define JS_ATOM_HASH_MASK  ((1 << 29) - 1)
 
 struct JSString {
     JSRefCountHeader header; /* must come first, 32-bit */
@@ -555,8 +555,9 @@ struct JSString {
     /* for JS_ATOM_TYPE_SYMBOL: hash = 0, atom_type = 3,
        for JS_ATOM_TYPE_PRIVATE: hash = 1, atom_type = 3
        XXX: could change encoding to have one more bit in hash */
-    uint32_t hash : 30;
+    uint32_t hash : 29;
     uint8_t atom_type : 2; /* != 0 if atom, JS_ATOM_TYPE_x */
+    uint8_t is_rope : 1;
     uint32_t hash_next; /* atom_index for JS_ATOM_TYPE_SYMBOL */
     JSWeakRefRecord *first_weak_ref;
 #ifdef ENABLE_DUMPS // JS_DUMP_LEAKS
@@ -564,14 +565,63 @@ struct JSString {
 #endif
 };
 
+typedef struct JSRope {
+    void *p1, *p2;
+    uint32_t depth;
+} JSRope;
+
+static inline JSRope *rope(JSString *p)
+{
+    assert(p->is_rope);
+    return (void *)&p[1];
+}
+
+static inline void *rope_left(JSString *p)
+{
+    return rope(p)->p1;
+}
+
+static inline void *rope_right(JSString *p)
+{
+    return rope(p)->p2;
+}
+
+static inline bool rope_is_flat(JSString *p)
+{
+    return p->is_rope ? rope_left(p) == NULL : false;
+}
+
+static inline uint32_t rope_depth(JSString *p)
+{
+    return p->is_rope ? rope(p)->depth : 0;
+}
+
+static inline uint32_t str_byte_len(JSString *p)
+{
+    return p->len << p->is_wide_char;
+}
+
+static inline bool str_is_leaf(JSString *p)
+{
+    return !p->is_rope || rope_is_flat(p);
+}
+
+static inline void *flat_rope(JSString *p)
+{
+    assert(rope_is_flat(p));
+    return rope_right(p);
+}
+
 static inline uint8_t *str8(JSString *p)
 {
-    return (void *)(p + 1);
+    assert(str_is_leaf(p));
+    return p->is_rope ? flat_rope(p) : (void *)(p + 1);
 }
 
 static inline uint16_t *str16(JSString *p)
 {
-    return (void *)(p + 1);
+    assert(str_is_leaf(p));
+    return p->is_rope ? flat_rope(p) : (void *)(p + 1);
 }
 
 typedef struct JSClosureVar {
@@ -2053,6 +2103,7 @@ static JSString *js_alloc_string_rt(JSRuntime *rt, int max_len, int is_wide_char
     str->atom_type = 0;
     str->hash = 0;          /* optional but costless */
     str->hash_next = 0;     /* optional */
+    str->is_rope = false;
 #ifdef ENABLE_DUMPS // JS_DUMP_LEAKS
     list_add_tail(&str->link, &rt->string_list);
 #endif
@@ -2070,19 +2121,156 @@ static JSString *js_alloc_string(JSContext *ctx, int max_len, int is_wide_char)
     return p;
 }
 
-/* same as JS_FreeValueRT() but faster */
-static inline void js_free_string(JSRuntime *rt, JSString *str)
+static inline void js_free_string0(JSRuntime *rt, JSString *p)
 {
-    if (--str->header.ref_count <= 0) {
-        if (str->atom_type) {
-            JS_FreeAtomStruct(rt, str);
-        } else {
+    JSRope *r;
+
+    if (p->atom_type) {
+        JS_FreeAtomStruct(rt, p);
+    } else {
 #ifdef ENABLE_DUMPS // JS_DUMP_LEAKS
-            list_del(&str->link);
+        list_del(&p->link);
 #endif
-            js_free_rt(rt, str);
+        if (p->is_rope) {
+            r = rope(p);
+            if (r->p1) {
+                JS_FreeValueRT(rt, JS_MKPTR(JS_TAG_STRING, r->p1));
+                JS_FreeValueRT(rt, JS_MKPTR(JS_TAG_STRING, r->p2));
+            } else {
+                js_free_rt(rt, r->p2);
+            }
         }
+        js_free_rt(rt, p);
     }
+}
+
+/* same as JS_FreeValueRT() but faster */
+static inline void js_free_string(JSRuntime *rt, JSString *p)
+{
+    if (--p->header.ref_count <= 0)
+        js_free_string0(rt, p);
+}
+
+static int js_flatten_rope_rt(JSRuntime *rt, JSString *str, char *buf)
+{
+    JSString *c, *p, **pp, *pp_s[64];
+    JSRope *r;
+    uint64_t pos;
+    uint32_t n;
+    int i;
+
+    assert(!str_is_leaf(str));
+    pos = 0;
+    i = 0;
+    p = str;
+    r = rope(str);
+    pp = pp_s;
+    if (r->depth > countof(pp_s)) {
+        pp = js_malloc_rt(rt, r->depth * sizeof(*pp));
+        if (!pp)
+            return -1;
+    }
+    for (;;) {
+        pp[i++] = p;
+        if (str_is_leaf(p))
+            break;
+        p = rope_left(p);
+    }
+    for (;;) {
+        assert(i > 0);
+        p = pp[--i];
+        assert(str_is_leaf(p));
+        n = str_byte_len(p);
+        memcpy(&buf[pos], str8(p), n);
+        pos += n;
+        // pop nodes until we find one whose right child is not visited yet
+        for (;;) {
+            assert(i > 0);
+            c = p;
+            p = pp[--i];
+            assert(!str_is_leaf(p));
+            if (c == rope_left(p))
+                break;
+            if (!i)
+                goto fini;
+        }
+        i++;
+        pp[i++] = p = rope_right(p);
+        while (!str_is_leaf(p))
+            pp[i++] = p = rope_left(p);
+    }
+fini:
+    if (pp != pp_s)
+        js_free_rt(rt, pp);
+    if (!str->is_wide_char)
+        buf[pos] = '\0';
+    return 0;
+}
+
+static int js_flatten_rope(JSContext *ctx, JSString *p, char *buf)
+{
+    if (js_flatten_rope_rt(ctx->rt, p, buf)) {
+        JS_ThrowOutOfMemory(ctx);
+        return -1;
+    }
+    return 0;
+}
+
+static int js_string_flatten_rt(JSRuntime *rt, JSString *p)
+{
+    JSString *p1, *p2;
+    JSRope *r;
+    char *buf;
+
+    if (!p->is_rope || rope_is_flat(p))
+        return 0;
+    buf = js_malloc_rt(rt, str_byte_len(p) + 1 - p->is_wide_char);
+    if (!buf)
+        return -1;
+    if (js_flatten_rope_rt(rt, p, buf)) {
+        js_free_rt(rt, buf);
+        return -1;
+    }
+    r = rope(p);
+    p1 = r->p1;
+    p2 = r->p2;
+    r->p1 = NULL;
+    r->p2 = buf;
+    r->depth = 0;
+    JS_FreeValueRT(rt, JS_MKPTR(JS_TAG_STRING, p1));
+    JS_FreeValueRT(rt, JS_MKPTR(JS_TAG_STRING, p2));
+    return 0;
+}
+
+static int js_string_flatten(JSContext *ctx, JSString *p)
+{
+    if (js_string_flatten_rt(ctx->rt, p)) {
+        JS_ThrowOutOfMemory(ctx);
+        return -1;
+    }
+    return 0;
+}
+
+static int js_string_flatten2(JSContext *ctx, JSString *p1, JSString *p2)
+{
+    if (js_string_flatten(ctx, p1) || js_string_flatten(ctx, p2))
+        return -1;
+    return 0;
+}
+
+static JSString *js_string_flat_from_rope(JSContext *ctx, JSString *p1)
+{
+    JSString *p2;
+
+    assert(p1->is_rope);
+    p2 = js_alloc_string(ctx, p1->len, p1->is_wide_char);
+    if (!p2)
+        return NULL;
+    if (js_flatten_rope(ctx, p1, (void *)&p2[1])) {
+        js_free_string(ctx->rt, p2);
+        return NULL;
+    }
+    return p2;
 }
 
 void JS_SetRuntimeInfo(JSRuntime *rt, const char *s)
@@ -3108,6 +3296,8 @@ static JSAtom JS_NewAtomStr(JSContext *ctx, JSString *p)
 {
     JSRuntime *rt = ctx->rt;
     uint32_t n;
+    if (js_string_flatten(ctx, p))
+        return JS_ATOM_NULL;
     if (is_num_string(&n, p)) {
         if (n <= JS_ATOM_MAX_INT) {
             js_free_string(rt, p);
@@ -3688,6 +3878,9 @@ static JSValue js_sub_string(JSContext *ctx, JSString *p, int start, int end)
     if (len <= 0) {
         return js_empty_string(ctx->rt);
     }
+    // TODO(bnoordhuis) flatten only start..end?
+    if (js_string_flatten(ctx, p))
+        return JS_EXCEPTION;
     if (p->is_wide_char) {
         JSString *str;
         int i;
@@ -4184,6 +4377,11 @@ const char *JS_ToCStringLen2(JSContext *ctx, size_t *plen, JSValueConst val1,
 
 go:
     str = JS_VALUE_GET_STRING(val);
+    if (str->is_rope) {
+        str = js_string_flat_from_rope(ctx, str);
+        if (!str)
+            return NULL;
+    }
     len = str->len;
     if (!str->is_wide_char) {
         const uint8_t *src = str8(str);
@@ -4348,6 +4546,8 @@ static JSValue JS_ConcatString1(JSContext *ctx, JSString *p1, JSString *p2)
     uint32_t len;
     int is_wide_char;
 
+    if (js_string_flatten2(ctx, p1, p2))
+        return JS_EXCEPTION;
     len = p1->len + p2->len;
     if (len > JS_STRING_LEN_MAX)
         return JS_ThrowRangeError(ctx, "invalid string length");
@@ -4370,22 +4570,20 @@ static JSValue JS_ConcatString1(JSContext *ctx, JSString *p1, JSString *p2)
    JS_EXCEPTION are accepted and return JS_EXCEPTION.  */
 static JSValue JS_ConcatString(JSContext *ctx, JSValue op1, JSValue op2)
 {
+    JSString *p, *p1, *p2;
     JSValue ret;
-    JSString *p1, *p2;
+    JSRope *r;
 
+    ret = JS_EXCEPTION;
     if (unlikely(JS_VALUE_GET_TAG(op1) != JS_TAG_STRING)) {
         op1 = JS_ToStringFree(ctx, op1);
-        if (JS_IsException(op1)) {
-            JS_FreeValue(ctx, op2);
-            return JS_EXCEPTION;
-        }
+        if (JS_IsException(op1))
+            goto fail;
     }
     if (unlikely(JS_VALUE_GET_TAG(op2) != JS_TAG_STRING)) {
         op2 = JS_ToStringFree(ctx, op2);
-        if (JS_IsException(op2)) {
-            JS_FreeValue(ctx, op1);
-            return JS_EXCEPTION;
-        }
+        if (JS_IsException(op2))
+            goto fail;
     }
     p1 = JS_VALUE_GET_STRING(op1);
     p2 = JS_VALUE_GET_STRING(op2);
@@ -4394,9 +4592,12 @@ static JSValue JS_ConcatString(JSContext *ctx, JSValue op1, JSValue op2)
     if (p2->len == 0) {
         goto ret_op1;
     }
-    if (p1->header.ref_count == 1 && p1->is_wide_char == p2->is_wide_char
+    if (p1->header.ref_count == 1
+    &&  p1->is_wide_char == p2->is_wide_char
     &&  js_malloc_usable_size(ctx, p1) >= sizeof(*p1) + ((p1->len + p2->len) << p2->is_wide_char) + 1 - p1->is_wide_char) {
         /* Concatenate in place in available space at the end of p1 */
+        if (js_string_flatten2(ctx, p1, p2))
+            goto fail;
         if (p1->is_wide_char) {
             memcpy(str16(p1) + p1->len, str16(p2), p2->len << 1);
             p1->len += p2->len;
@@ -4409,7 +4610,21 @@ static JSValue JS_ConcatString(JSContext *ctx, JSValue op1, JSValue op2)
         JS_FreeValue(ctx, op2);
         return op1;
     }
+    if (p1->is_wide_char == p2->is_wide_char) {
+        p = js_alloc_string(ctx, sizeof(*r), /*is_wide_char*/false);
+        if (!p)
+            goto fail;
+        p->is_wide_char = p1->is_wide_char;
+        p->is_rope = true;
+        p->len = p1->len + p2->len;
+        r = rope(p);
+        r->p1 = p1;
+        r->p2 = p2;
+        r->depth = 1 + max_uint32(rope_depth(p1), rope_depth(p2));
+        return JS_MKPTR(JS_TAG_STRING, p);
+    }
     ret = JS_ConcatString1(ctx, p1, p2);
+fail:
     JS_FreeValue(ctx, op1);
     JS_FreeValue(ctx, op2);
     return ret;
@@ -5751,17 +5966,7 @@ static void js_free_value_rt(JSRuntime *rt, JSValue v)
 
     switch(tag) {
     case JS_TAG_STRING:
-        {
-            JSString *p = JS_VALUE_GET_STRING(v);
-            if (p->atom_type) {
-                JS_FreeAtomStruct(rt, p);
-            } else {
-#ifdef ENABLE_DUMPS // JS_DUMP_LEAKS
-                list_del(&p->link);
-#endif
-                js_free_rt(rt, p);
-            }
-        }
+        js_free_string0(rt, JS_VALUE_GET_STRING(v));
         break;
     case JS_TAG_OBJECT:
     case JS_TAG_FUNCTION_BYTECODE:
@@ -12917,6 +13122,8 @@ static JSValue JS_ToQuotedString(JSContext *ctx, JSValueConst val1)
     if (JS_IsException(val))
         return val;
     p = JS_VALUE_GET_STRING(val);
+    if (js_string_flatten(ctx, p))
+        return JS_EXCEPTION;
 
     if (string_buffer_init(ctx, b, p->len + 2))
         goto fail;
@@ -14458,7 +14665,11 @@ static bool js_strict_eq2(JSContext *ctx, JSValue op1, JSValue op2,
             } else {
                 p1 = JS_VALUE_GET_STRING(op1);
                 p2 = JS_VALUE_GET_STRING(op2);
-                res = js_string_eq(p1, p2);
+                if (js_string_flatten2(ctx, p1, p2)) {
+                    res = false; // exception pending
+                } else {
+                    res = js_string_eq(p1, p2);
+                }
             }
         }
         break;
