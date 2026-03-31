@@ -1706,6 +1706,14 @@ void update_stats(JSRuntime *rt, const char *filename) {
     js_mutex_unlock(&stats_mutex);
 }
 
+static void debug_break(JSContext *ctx, JSValueConst func_obj,
+                        JSValueConst this_obj, JSValueConst new_target,
+                        int argc, JSValueConst *argv)
+{
+    uintptr_t debug_break_count = (uintptr_t)JS_GetContextOpaque(ctx);
+    JS_SetContextOpaque(ctx, (void *)(debug_break_count + 1));
+}
+
 static JSValue qjs_black_box(JSContext *ctx, JSValueConst this_val,
                             int argc, JSValueConst argv[], int magic)
 {
@@ -1724,8 +1732,9 @@ JSContext *JS_NewCustomContext(JSRuntime *rt)
     JSContext *ctx;
     JSValue obj;
 
-    ctx = JS_NewContext(rt);
+    ctx = JS_NewDebugContext(rt, debug_break);
     if (ctx && local) {
+        JS_SetContextOpaque(ctx, (void *)(uintptr_t)0);
         js_init_module_std(ctx, "qjs:std");
         js_init_module_os(ctx, "qjs:os");
         js_init_module_bjson(ctx, "qjs:bjson");
@@ -1793,6 +1802,9 @@ int run_test_buf(ThreadLocalStorage *tls, const char *filename, char *harness,
         update_stats(rt, filename);
     }
     js_agent_free(ctx);
+    // debug breaks correspond _roughly_ to statements
+    uintptr_t debug_break_count = (uintptr_t)JS_GetContextOpaque(ctx);
+    printf("% 8lu stmts %s\n", debug_break_count, filename);
     JS_FreeContext(ctx);
     js_std_free_handlers(rt);
     JS_FreeRuntime(rt);

@@ -535,6 +535,7 @@ struct JSContext {
     JSValue (*eval_internal)(JSContext *ctx, JSValueConst this_obj,
                              const char *input, size_t input_len,
                              const char *filename, int line, int flags, int scope_idx);
+    JSDebugBreakFunc *debug_break;
     void *user_opaque;
 };
 
@@ -2519,6 +2520,16 @@ JSContext *JS_NewContext(JSRuntime *rt)
         return NULL;
     }
 
+    return ctx;
+}
+
+JSContext *JS_NewDebugContext(JSRuntime *rt, JSDebugBreakFunc *debug_break)
+{
+    JSContext *ctx;
+
+    ctx = JS_NewContext(rt);
+    if (ctx)
+        ctx->debug_break = debug_break;
     return ctx;
 }
 
@@ -19986,6 +19997,12 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             JS_FreeValue(ctx, sp[-1]);
             sp[-1] = JS_FALSE;
             BREAK;
+        CASE(OP_debug):
+            if (ctx->debug_break) {
+                ctx->debug_break(ctx, func_obj, this_obj,
+                                 new_target, argc, argv);
+            }
+            BREAK;
         CASE(OP_invalid):
         DEFAULT:
             JS_ThrowInternalError(ctx, "invalid opcode: pc=%u opcode=0x%02x",
@@ -21481,6 +21498,7 @@ typedef struct JSParseState {
     JSFunctionDef *cur_func;
     bool is_module; /* parsing a module */
     bool allow_html_comments;
+    bool emit_debug;
 } JSParseState;
 
 typedef struct JSOpCode {
@@ -23065,6 +23083,8 @@ static void emit_source_loc(JSParseState *s)
     dbuf_putc(bc, OP_source_loc);
     dbuf_put_u32(bc, s->token.line_num);
     dbuf_put_u32(bc, s->token.col_num);
+    if (s->emit_debug)
+        dbuf_putc(bc, OP_debug);
 }
 
 static void emit_op(JSParseState *s, uint8_t val)
@@ -27704,8 +27724,10 @@ static void emit_return(JSParseState *s, bool hasval)
         emit_label(s, label_return);
         emit_op(s, OP_return);
     } else if (s->cur_func->func_kind != JS_FUNC_NORMAL) {
+        emit_source_loc(s);
         emit_op(s, OP_return_async);
     } else {
+        emit_source_loc(s);
         emit_op(s, hasval ? OP_return : OP_return_undef);
     }
 }
@@ -33211,10 +33233,14 @@ static bool code_match(CodeContext *s, int pos, ...)
             pos_next = pos + len;
             if (pos_next > s->bc_len)
                 goto done;
+            // OP_debug is only emitted when debugging is enabled but when
+            // present, it's always immediately preceded by OP_source_loc
             if (op == OP_source_loc) {
                 line_num = get_u32(tab + pos + 1);
                 col_num = get_u32(tab + pos + 5);
                 pos = pos_next;
+            } else if (op == OP_debug) {
+                pos = pos_next; // skip
             } else {
                 break;
             }
@@ -36368,6 +36394,7 @@ static void js_parse_init(JSContext *ctx, JSParseState *s,
     s->token.val = ' ';
     s->token.line_num = 1;
     s->token.col_num = 1;
+    s->emit_debug = (ctx->debug_break != NULL);
 }
 
 static JSValue JS_EvalFunctionInternal(JSContext *ctx, JSValue fun_obj,
