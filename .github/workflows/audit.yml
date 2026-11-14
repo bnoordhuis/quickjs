@@ -48,6 +48,13 @@ jobs:
             cmake: -DCMAKE_BUILD_TYPE=RelWithDebInfo
             san: ''
             asan_options: ''
+          - name: linux-x86-m32-gcc-asan-ubsan
+            os: ubuntu-latest
+            cc: gcc
+            m32: true
+            cmake: -DCMAKE_BUILD_TYPE=Debug -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON -DCMAKE_C_FLAGS=-m32
+            san: -m32 -fsanitize=address,undefined
+            asan_options: detect_leaks=1
           - name: linux-arm64-gcc-asan-ubsan
             os: ubuntu-24.04-arm
             cc: gcc
@@ -65,6 +72,10 @@ jobs:
       UBSAN_OPTIONS: print_stacktrace=1
     steps:
       - uses: actions/checkout@v7
+
+      - name: install 32-bit toolchain
+        if: ${{ matrix.m32 }}
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
 
       - name: build
         run: |

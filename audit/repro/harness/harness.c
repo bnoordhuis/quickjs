@@ -10,15 +10,18 @@ static double now_ms(void) {
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 static double start, deadline;
-static int interrupt(JSContext *ctx, void *opaque) { return now_ms() - start > deadline; }
+// Globals so LeakSanitizer sees the runtime as reachable: teardown is skipped on purpose.
+static JSRuntime *rt;
+static JSContext *ctx;
+static int interrupt(JSContext *c, void *opaque) { return now_ms() - start > deadline; }
 
 int main(int argc, char **argv) {
     if (argc < 3) return 2;
     deadline = atof(argv[2]);
     FILE *f = fopen(argv[1], "rb"); if (!f) return 2;
     static char buf[1 << 20]; size_t n = fread(buf, 1, sizeof(buf) - 1, f); buf[n] = 0; fclose(f);
-    JSRuntime *rt = JS_NewRuntime();
-    JSContext *ctx = JS_NewContext(rt);
+    rt = JS_NewRuntime();
+    ctx = JS_NewContext(rt);
     JS_SetInterruptHandler(rt, interrupt, NULL);
     start = now_ms();
     JSValue v = JS_Eval(ctx, buf, n, argv[1], JS_EVAL_TYPE_GLOBAL);
