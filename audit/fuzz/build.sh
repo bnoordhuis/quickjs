@@ -6,11 +6,13 @@ set -eu
 OUT=${1:-build/fuzz}
 CC=${CC:-clang}
 HERE=$(dirname "$0")
-# -fno-sanitize=function: String.prototype.normalize calls the allocator through a
-#   mismatched function pointer type (findings.md N3); without this every input aborts.
+# The function sanitizer stays on unless the source still has the mismatched
+#   allocator casts (findings.md N3), which abort on every normalize() call.
 # -D__SANITIZE_ADDRESS__=1: clang does not define it, and the engine's small-block
 #   arena would otherwise hide use-after-free from ASan (findings.md H1).
-FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize=function
+NOFUNC=""
+grep -q '(DynBufReallocFunc \*)js_realloc' quickjs.c && NOFUNC="-fno-sanitize=function"
+FLAGS="-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined $NOFUNC
   -fno-sanitize-recover=undefined -D_GNU_SOURCE -DQUICKJS_NG_BUILD -D__SANITIZE_ADDRESS__=1
   -funsigned-char -I."
 mkdir -p "$OUT/obj"
