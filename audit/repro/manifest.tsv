@@ -1,0 +1,65 @@
+# name	timeout(s)	command (run with sh from audit/repro; $QJS, $HARNESS, $TLA are set by run-repro.sh)
+i1570	60	$QJS -C i1570.js
+i1787	60	$QJS -C i1787.js
+i1865	300	$QJS -C i1865.js
+i1901	60	$QJS -m i1901.mjs
+i1907-map	60	$QJS -C i1907-map.js
+i1907-set	60	$QJS -C i1907-set.js
+i1908	60	$QJS -C i1908.js
+i1909	300	$QJS -C i1909.js
+i1910	60	$QJS -C i1910.js
+r1902-03	60	$QJS -C r1902-03.js
+r1902-03m	60	$QJS -m r1902-03m.mjs
+r1902-11	60	$QJS -C r1902-11.js
+r1902-13	120	$QJS -C r1902-13.js
+r1902-18	60	$QJS -C r1902-18.js
+r1902-19	60	$QJS -C r1902-19.js
+r1902-21	60	$QJS -C r1902-21.js
+r1902-26	60	$QJS -C r1902-26.js
+weakmap-symbol	60	$QJS -C weakmap-symbol.js
+modules-1902-7	60	cd modules-1902-7 && $QJS -m main.mjs
+modules-1833-deep	60	cd modules-1833 && $QJS -m deep.js
+modules-1833-repeat	60	cd modules-1833 && $QJS -m repeat.js
+tla-teardown	60	$TLA
+dos-arr-concat	40	$HARNESS dos/arr-concat.js 1000
+dos-arr-control-indexOf	40	$HARNESS dos/arr-control-indexOf.js 1000
+dos-arr-copyWithin	40	$HARNESS dos/arr-copyWithin.js 1000
+dos-arr-fill	40	$HARNESS dos/arr-fill.js 1000
+dos-arr-flat	40	$HARNESS dos/arr-flat.js 1000
+dos-arr-join	40	$HARNESS dos/arr-join.js 1000
+dos-arr-lastIndexOf	40	$HARNESS dos/arr-lastIndexOf.js 1000
+dos-arr-reverse	40	$HARNESS dos/arr-reverse.js 1000
+dos-arr-shift	40	$HARNESS dos/arr-shift.js 1000
+dos-arr-sort	40	$HARNESS dos/arr-sort.js 1000
+dos-arr-splice	40	$HARNESS dos/arr-splice.js 1000
+dos-control-loop	40	$HARNESS dos/control-loop.js 1000
+dos-normalize	40	$HARNESS dos/normalize.js 1000
+dos-promise-executor	40	$HARNESS dos/promise-executor.js 1000
+dos-with-eval-loop	40	$HARNESS dos/with-eval-loop.js 1000
+fork-08a83c9	120	cd fork-tests && $QJS -m 08a83c9-finally-control-flow.js
+fork-08c81d7	120	cd fork-tests && $QJS -m 08c81d7-parameter-limit-destructuring.js
+fork-11a4fba	120	cd fork-tests && $QJS -m 11a4fba-async-generator-await-reentry.js
+fork-2e52302	120	cd fork-tests && $QJS -m 2e52302-destructuring-colon.js
+fork-3ad65ad	120	cd fork-tests && $QJS -m 3ad65ad-map-clear-iterator-value-uaf.js
+fork-3e236cb	120	cd fork-tests && $QJS -m 3e236cb-direct-eval-closure-var-overflow.js
+fork-3e4bd80	120	cd fork-tests && $QJS -m 3e4bd80-module-function-normal-call.js
+fork-45c5b9b	120	cd fork-tests && $QJS -m 45c5b9b-weakref-weakmap-value-same-target.js
+fork-481af72	120	cd fork-tests && $QJS -m 481af72-with-optional-call.js
+fork-4a8f435	120	cd fork-tests && $QJS -m 4a8f435-callsite-internal-closure.js
+fork-57f61a1	120	cd fork-tests && $QJS -m 57f61a1-iterator-helper-stack-overflow.js
+fork-5dfe7c8	120	cd fork-tests && $QJS -m 5dfe7c8-function-realm-chain-stack.js
+fork-5e4785a	120	cd fork-tests && $QJS -m 5e4785a-generator-prologue-var-ref-gc.js
+fork-624540d	120	cd fork-tests && $QJS -m 624540d-error-stacktracelimit-release.js
+fork-6d30cf2	120	cd fork-tests && $QJS -m 6d30cf2-private-in-escaped-identifier.js
+fork-7ca4ac5	120	cd fork-tests && $QJS -m 7ca4ac5-finalizationregistry-unregister-held-target.js
+fork-8f0d3b6	120	cd fork-tests && $QJS -m 8f0d3b6-mapped-arguments-var-ref-overflow.js
+fork-a4727f8	120	cd fork-tests && $QJS -m a4727f8-instanceof-bound-chain-stack.js
+fork-b163d1c	120	cd fork-tests && $QJS -m b163d1c-scope-count-limit.js
+fork-bd35e59	120	cd fork-tests && $QJS -m bd35e59-slice-atom-symbol-description.js
+fork-c5ae9de	120	cd fork-tests && $QJS -m c5ae9de-using-yield-first-declaration.js
+fork-cfb7229	120	cd fork-tests && $QJS -m cfb7229-weakmap-symbol-chain-free.js
+fork-d86b4b8	120	cd fork-tests && $QJS -m d86b4b8-eval-empty-argument-scope.js
+fork-db22ea7	120	cd fork-tests && $QJS -m db22ea7-new-super-call.js
+fork-e18e8f5	120	cd fork-tests && $QJS -m e18e8f5-var-limit-implicit-bindings.js
+fork-e9a41e4	120	cd fork-tests && $QJS -m e9a41e4-closure-var-limit-unchecked-index.js
+fork-ea1d0f5	120	cd fork-tests && $QJS -m ea1d0f5-error-preparestacktrace-release.js

@@ -1,0 +1,10 @@
+var s = new Set();
+var h = {};
+s.add(h);
+s.add('b');
+var it = s.values();
+it.next(); it.next();
+s.delete('b');
+h.it = it;
+h = it = null;
+s.clear();

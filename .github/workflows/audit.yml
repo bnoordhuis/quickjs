@@ -1,0 +1,132 @@
+name: audit
+
+# Security-audit reproducers across platforms. Runs only on pushes to audit/**
+# branches (and by hand), so pushing those branches does not trigger the
+# regular pull-request CI. Report-only: jobs pass as long as the runner
+# completes; read the job summary or the uploaded logs for results.
+
+on:
+  push:
+    branches:
+      - 'audit/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64-gcc-asan-ubsan
+            os: ubuntu-latest
+            cc: gcc
+            cmake: -DCMAKE_BUILD_TYPE=Debug -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON
+            san: -fsanitize=address,undefined
+            asan_options: detect_leaks=1
+          - name: linux-x64-gcc-asan-gcstress
+            os: ubuntu-latest
+            cc: gcc
+            cmake: -DCMAKE_BUILD_TYPE=Debug -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_GC_STRESS=ON
+            san: -fsanitize=address
+            asan_options: detect_leaks=0
+          - name: linux-x64-clang-asan-ubsan
+            os: ubuntu-latest
+            cc: clang
+            # clang does not define __SANITIZE_ADDRESS__; without it the arena hides small-object UAFs
+            cmake: -DCMAKE_BUILD_TYPE=Debug -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON -DCMAKE_C_FLAGS=-D__SANITIZE_ADDRESS__=1
+            san: -fsanitize=address,undefined
+            asan_options: detect_leaks=1
+          - name: linux-x64-release
+            os: ubuntu-latest
+            cc: gcc
+            cmake: -DCMAKE_BUILD_TYPE=RelWithDebInfo
+            san: ''
+            asan_options: ''
+          - name: linux-arm64-gcc-asan-ubsan
+            os: ubuntu-24.04-arm
+            cc: gcc
+            cmake: -DCMAKE_BUILD_TYPE=Debug -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON
+            san: -fsanitize=address,undefined
+            asan_options: detect_leaks=1
+          - name: macos-arm64-clang-asan-ubsan
+            os: macos-15
+            cc: clang
+            cmake: -DCMAKE_BUILD_TYPE=Debug -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON -DCMAKE_C_FLAGS=-D__SANITIZE_ADDRESS__=1
+            san: -fsanitize=address,undefined
+            asan_options: detect_leaks=0
+    env:
+      ASAN_OPTIONS: ${{ matrix.asan_options }}
+      UBSAN_OPTIONS: print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: build
+        run: |
+          cmake -S . -B build -DCMAKE_C_COMPILER=${{ matrix.cc }} ${{ matrix.cmake }}
+          cmake --build build -j 4 --target qjs_exe qjs
+          ${{ matrix.cc }} -g -O1 ${{ matrix.san }} -I. -o build/harness audit/repro/harness/harness.c build/libqjs.a -lm -lpthread
+          ${{ matrix.cc }} -g -O1 ${{ matrix.san }} -I. -o build/tla audit/repro/harness/tla-teardown.c build/libqjs.a -lm -lpthread
+
+      - name: run reproducers
+        run: |
+          sh audit/run-repro.sh build/qjs build/harness build/tla audit-out > audit-out.md
+          { echo "## ${{ matrix.name }}"; echo; cat audit-out.md; } >> "$GITHUB_STEP_SUMMARY"
+          cat audit-out.md
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: audit-${{ matrix.name }}
+          path: audit-out
+          retention-days: 14
+
+  repro-x86:
+    name: linux-x86-debug (32-bit, no sanitizers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: alpine.sh {0}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install extra dependencies
+        shell: sh
+        run: sudo apt update && sudo apt install -y binfmt-support
+
+      - name: Setup Alpine
+        uses: quickjs-ng/setup-alpine@master
+        with:
+          arch: x86
+          packages: "build-base cmake python3 perl coreutils"
+          apk-tools-url: https://raw.githubusercontent.com/quickjs-ng/apk-for-ci/refs/heads/master/apk.static#!sha256!34bb1a96f0258982377a289392d4ea9f3f4b767a4bb5806b1b87179b79ad8a1c
+
+      - name: build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build -j 4 --target qjs_exe qjs
+          gcc -g -O1 -I. -o build/harness audit/repro/harness/harness.c build/libqjs.a -lm -lpthread
+          gcc -g -O1 -I. -o build/tla audit/repro/harness/tla-teardown.c build/libqjs.a -lm -lpthread
+
+      - name: run reproducers
+        run: |
+          sh audit/run-repro.sh build/qjs build/harness build/tla audit-out > audit-out.md
+          cat audit-out.md
+
+      - name: summary
+        if: always()
+        shell: sh
+        run: '{ echo "## linux-x86-debug"; echo; cat audit-out.md; } >> "$GITHUB_STEP_SUMMARY"'
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: audit-linux-x86-debug
+          path: audit-out
+          retention-days: 14
