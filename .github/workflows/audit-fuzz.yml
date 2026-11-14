@@ -17,13 +17,13 @@ permissions:
   actions: read
 
 env:
-  FUZZ_SECONDS: 3600
+  FUZZ_SECONDS: 19800   # 5.5 hours; GitHub's limit is 6 hours per job
 
 jobs:
   fuzz:
     name: fuzz-${{ matrix.target }} ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 350
+    timeout-minutes: 355
     strategy:
       fail-fast: false
       matrix:
