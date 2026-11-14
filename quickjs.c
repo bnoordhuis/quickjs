@@ -48317,16 +48317,14 @@ static JSValue js_string_localeCompare(JSContext *ctx, JSValueConst this_val,
         goto exception;
 
     // TODO(bnoordhuis) skip normalization when input is latin1
-    an = unicode_normalize(&ts, as, an, UNICODE_NFC, ctx,
-                           (DynBufReallocFunc *)js_realloc);
+    an = unicode_normalize(&ts, as, an, UNICODE_NFC, ctx, js_dbuf_realloc);
     if (an == -1)
         goto exception;
     js_free(ctx, as);
     as = ts;
 
     // TODO(bnoordhuis) skip normalization when input is latin1
-    bn = unicode_normalize(&ts, bs, bn, UNICODE_NFC, ctx,
-                           (DynBufReallocFunc *)js_realloc);
+    bn = unicode_normalize(&ts, bs, bn, UNICODE_NFC, ctx, js_dbuf_realloc);
     if (bn == -1)
         goto exception;
     js_free(ctx, bs);
@@ -48468,7 +48466,7 @@ static JSValue js_string_normalize(JSContext *ctx, JSValueConst this_val,
     }
 
     out_len = unicode_normalize(&out_buf, buf, buf_len, n_type,
-                                ctx->rt, (DynBufReallocFunc *)js_realloc_rt);
+                                ctx, js_dbuf_realloc);
     js_free(ctx, buf);
     if (out_len < 0)
         return JS_EXCEPTION;
