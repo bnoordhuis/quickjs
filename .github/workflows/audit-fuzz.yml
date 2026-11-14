@@ -1,0 +1,78 @@
+name: audit-fuzz
+
+# libFuzzer campaigns for the component targets in audit/fuzz. Runs only on
+# pushes to audit-fuzz/** branches. Each job fuzzes one target on all cores for
+# FUZZ_SECONDS, starting from the corpus the previous run on the same branch
+# uploaded, and uploads the minimized corpus and any crashing inputs.
+#
+# A job fails when it saved a crashing input; the job summary lists signatures.
+
+on:
+  push:
+    branches:
+      - 'audit-fuzz/**'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  FUZZ_SECONDS: 3600
+
+jobs:
+  fuzz:
+    name: fuzz-${{ matrix.target }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [regexp, json, number, date, string]
+        arch: [x64, arm64]
+        include:
+          - arch: x64
+            os: ubuntu-latest
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: build
+        run: sh audit/fuzz/build.sh build/fuzz
+
+      - name: restore corpus from the previous run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev=$(gh run list -R "$GITHUB_REPOSITORY" --workflow audit-fuzz.yml --branch "$GITHUB_REF_NAME" \
+                   --status completed --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$prev" ] && gh run download "$prev" -R "$GITHUB_REPOSITORY" \
+               -n fuzz-corpus-${{ matrix.target }}-${{ matrix.arch }} -D build/fuzz/corpus/${{ matrix.target }}; then
+            echo "restored $(ls build/fuzz/corpus/${{ matrix.target }} | wc -l) inputs from run $prev"
+          else
+            echo "no previous corpus"
+          fi
+
+      - name: fuzz
+        run: |
+          set +e
+          sh audit/fuzz/run-fuzz.sh ${{ matrix.target }} "$FUZZ_SECONDS" build/fuzz > summary.md
+          rc=$?
+          cat summary.md | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fuzz-corpus-${{ matrix.target }}-${{ matrix.arch }}
+          path: build/fuzz/corpus-min/${{ matrix.target }}
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fuzz-findings-${{ matrix.target }}-${{ matrix.arch }}
+          path: |
+            build/fuzz/crashes/${{ matrix.target }}
+            build/fuzz/fuzz-${{ matrix.target }}.log
+          retention-days: 30
