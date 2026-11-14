@@ -88,7 +88,9 @@ jobs:
 
   repro-x86:
     name: linux-x86-debug (32-bit, no sanitizers)
-    runs-on: ubuntu-latest
+    # setup-alpine switches sudo alternatives, which only exist on 26.04;
+    # ubuntu-latest is still 24.04 on some accounts
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     defaults:
       run:
@@ -122,7 +124,7 @@ jobs:
       - name: summary
         if: always()
         shell: sh
-        run: '{ echo "## linux-x86-debug"; echo; cat audit-out.md; } >> "$GITHUB_STEP_SUMMARY"'
+        run: '{ echo "## linux-x86-debug"; echo; cat audit-out.md 2>/dev/null || echo "no results"; } >> "$GITHUB_STEP_SUMMARY"'
 
       - uses: actions/upload-artifact@v7
         if: always()

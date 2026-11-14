@@ -63,3 +63,4 @@ fork-db22ea7	120	cd fork-tests && $QJS -m db22ea7-new-super-call.js
 fork-e18e8f5	120	cd fork-tests && $QJS -m e18e8f5-var-limit-implicit-bindings.js
 fork-e9a41e4	120	cd fork-tests && $QJS -m e9a41e4-closure-var-limit-unchecked-index.js
 fork-ea1d0f5	120	cd fork-tests && $QJS -m ea1d0f5-error-preparestacktrace-release.js
+n3-fnptr	60	$QJS -C n3-fnptr.js
