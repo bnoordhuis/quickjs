@@ -24,6 +24,9 @@
 
     if (s !== undefined) {
         var t = Date.parse(s);
+        // Date.parse can return a value just outside the valid range when a UTC
+        // offset pushes it over (findings.md N5); the constructor clips it to NaN.
+        if (Math.abs(t) > 8.64e15) return;
         var d = new Date(s);
         chk(Object.is(d.getTime(), t), "Date.parse and new Date(string) disagree for " + JSON.stringify(s));
         exercise(d, "parse " + JSON.stringify(s));

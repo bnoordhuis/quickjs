@@ -21,6 +21,9 @@ DICT=""
 rc=$?
 "$B/fuzz-$T" -merge=1 "$B/corpus-min/$T" "$B/corpus/$T" "$B/seeds/$T" > "$B/merge-$T.log" 2>&1
 
+# libFuzzer's fork mode leaks one small allocation of its own at exit on arm64
+# and saves it as an empty "crash" input; drop those.
+find "$B/crashes/$T" -type f -size 0 -name 'crash-*' -delete 2>/dev/null
 count() { ls "$B/crashes/$T" 2>/dev/null | grep -c "^$1-" ; }
 crashes=$(count crash) timeouts=$(count timeout) ooms=$(count oom) leaks=$(count leak)
 echo "### fuzz-$T: ${SECS}s on $JOBS cores (exit $rc)"

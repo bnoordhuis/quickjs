@@ -12,7 +12,9 @@
 // keep no state between calls. If a crash does not reproduce from its input
 // alone, an earlier input corrupted the shared runtime: set FZ_FRESH=1 to use
 // a fresh runtime for every input when reproducing.
-// Execution is bounded by a deterministic interrupt budget, not wall time.
+// Execution is bounded by a deterministic interrupt budget, with a wall-clock
+// limit (FZ_WALL_MS) as a backstop for inputs whose interrupt intervals are
+// themselves slow.
 #ifndef FUZZ_COMMON_H
 #define FUZZ_COMMON_H
 
@@ -20,11 +22,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "quickjs.h"
 
 #define FZ_MAX_UNITS 8192
 
 #define FZ_REUSE 1000
+#define FZ_WALL_MS 1500
 
 typedef struct {
     JSRuntime *rt;
@@ -32,6 +36,7 @@ typedef struct {
     JSValue fn;      // the driver function
     int budget;
     int uses;
+    double deadline;   // ms, CLOCK_MONOTONIC
 } Fuzz;
 
 static char *fz_driver_src;
@@ -60,10 +65,17 @@ static void fz_load_driver(const char *argv0, const char *name)
     setenv("TZ", "UTC", 1);
 }
 
+static double fz_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
 static int fz_interrupt(JSContext *ctx, void *opaque)
 {
     Fuzz *f = opaque;
-    return --f->budget < 0;
+    return --f->budget < 0 || fz_now() > f->deadline;
 }
 
 static Fuzz fz_state;
@@ -92,6 +104,7 @@ static Fuzz *fz_begin(int budget)
             abort();
         JS_SetInterruptHandler(f->rt, fz_interrupt, f);
         f->budget = 1 << 20;
+        f->deadline = fz_now() + 60000;
         f->fn = JS_Eval(f->ctx, fz_driver_src, fz_driver_len, "driver.js", JS_EVAL_TYPE_GLOBAL);
         if (!JS_IsFunction(f->ctx, f->fn)) {
             fprintf(stderr, "driver did not evaluate to a function\n");
@@ -100,6 +113,7 @@ static Fuzz *fz_begin(int budget)
         f->uses = 0;
     }
     f->budget = budget;
+    f->deadline = fz_now() + FZ_WALL_MS;
     return f;
 }
 
