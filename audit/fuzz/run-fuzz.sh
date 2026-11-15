@@ -37,7 +37,8 @@ if [ $((crashes + leaks)) -gt 0 ]; then
     echo '|---|---|---|'
     for f in "$B/crashes/$T"/crash-* "$B/crashes/$T"/leak-*; do
         [ -f "$f" ] || continue
-        out=$("$B/fuzz-$T" "$f" 2>&1)
+        # re-running a crashing input saves it again; keep that inside the crash directory, not the cwd
+        out=$("$B/fuzz-$T" -artifact_prefix="$B/crashes/$T/" "$f" 2>&1)
         sig=$(printf '%s\n' "$out" | grep -m1 -E '^ORACLE|ERROR: AddressSanitizer|runtime error:|Assertion .* failed|ERROR: LeakSanitizer' \
               | sed -E 's/==[0-9]+==//; s/ on (unknown )?address 0x[0-9a-f]+.*//; s#^/[^ ]*/##; s/ \| .*//' | cut -c1-140)
         frame=$(printf '%s\n' "$out" | grep -E '^\s+#[0-9]+ 0x' | grep -v -E 'sanitizer|interceptor|libc\.so|asan_|fuzzer' | head -n 1 \

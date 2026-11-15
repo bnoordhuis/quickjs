@@ -22,6 +22,7 @@ env:
 jobs:
   gcstress-ta:
     name: gcstress ta-sweep ${{ matrix.shard }}/12
+    if: ${{ !startsWith(github.ref_name, 'audit-sweep/arm64') }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
@@ -53,6 +54,7 @@ jobs:
 
   gcstress-array:
     name: gcstress array-sweep ${{ matrix.shard }}/8
+    if: ${{ !startsWith(github.ref_name, 'audit-sweep/arm64') }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
@@ -84,6 +86,7 @@ jobs:
 
   asan-platforms:
     name: asan+ubsan ${{ matrix.name }}
+    if: ${{ !startsWith(github.ref_name, 'audit-sweep/arm64') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 300
     strategy:
@@ -118,7 +121,12 @@ jobs:
         run: |
           set +e
           rc=0
-          for s in ta-sweep array-sweep; do
+          # gcc ASan on the arm64 runners is about 50 times slower on these
+          # sweeps: the typed-array sweep alone takes 3.5 hours there, so the
+          # array sweep runs sharded in the asan-arm64-array job instead.
+          sweeps="ta-sweep array-sweep"
+          [ "${{ matrix.name }}" = linux-arm64-gcc ] && sweeps=ta-sweep
+          for s in $sweeps; do
             sh audit/sweep/run-shards.sh build/qjs audit/sweep/$s.js sweep-out/$s 0 1 > summary-$s.md || rc=1
             cat summary-$s.md | tee -a "$GITHUB_STEP_SUMMARY"
           done
@@ -131,4 +139,41 @@ jobs:
             sweep-out/*/crashes.tsv
             sweep-out/*/part*.txt
             sweep-out/*/part*/crash-*.log
+          retention-days: 14
+
+  # Pushing to audit-sweep/arm64* runs only this job.
+  asan-arm64-array:
+    name: asan+ubsan linux-arm64-gcc array-sweep ${{ matrix.shard }}/6
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    env:
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v7
+      - name: build
+        run: |
+          cmake -S . -B build -DCMAKE_C_COMPILER=gcc ${{ env.OPT_FLAGS }} -DQJS_ENABLE_ASAN=ON -DQJS_ENABLE_UBSAN=ON
+          cmake --build build -j 4 --target qjs_exe
+      - name: sweep
+        run: |
+          set +e
+          start=$(date +%s)
+          sh audit/sweep/run-shards.sh build/qjs audit/sweep/array-sweep.js sweep-out ${{ matrix.shard }} 6 > summary.md
+          rc=$?
+          echo "- wall time: $(( ($(date +%s) - start) / 60 )) min" >> summary.md
+          cat summary.md | tee -a "$GITHUB_STEP_SUMMARY"
+          exit $rc
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sweep-asan-arm64-array-${{ matrix.shard }}
+          path: |
+            sweep-out/crashes.tsv
+            sweep-out/part*.txt
+            sweep-out/part*/crash-*.log
+            sweep-out/part*/run.out
           retention-days: 14
