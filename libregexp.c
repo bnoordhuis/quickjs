@@ -160,14 +160,11 @@ typedef struct {
     REString **hash_table;
 } REStringList;
 
-static uint32_t re_string_hash(int len, const uint32_t *buf)
+static uint32_t re_string_hash(REStringList *s, int len, const uint32_t *buf)
 {
-    int i;
-    uint32_t h;
-    h = 1;
-    for(i = 0; i < len; i++)
-        h = h * 263 + buf[i];
-    return hash32(h);
+    uint64_t key[2];
+    lre_hash_key(s->cr.mem_opaque, key);
+    return siphash(key, 0, buf, len * sizeof(buf[0]));
 }
 
 static void re_string_list_init(REParseState *s1, REStringList *s)
@@ -303,7 +300,7 @@ static int re_string_find(REStringList *s, int len, const uint32_t *buf,
                           bool add_flag)
 {
     uint32_t h0;
-    h0 = re_string_hash(len, buf);
+    h0 = re_string_hash(s, len, buf);
     return re_string_find2(s, len, buf, h0, add_flag);
 }
 
@@ -3474,6 +3471,12 @@ bool lre_check_stack_overflow(void *opaque, size_t alloca_size)
 void *lre_realloc(void *opaque, void *ptr, size_t size)
 {
     return realloc(ptr, size);
+}
+
+void lre_hash_key(void *opaque, uint64_t key[2])
+{
+    key[0] = 0;
+    key[1] = 0;
 }
 
 int main(int argc, char **argv)

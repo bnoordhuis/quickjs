@@ -70,6 +70,10 @@ bool lre_check_stack_overflow(void *opaque, size_t alloca_size);
 /* must be provided by the user, return non zero if time out */
 int lre_check_timeout(void *opaque);
 void *lre_realloc(void *opaque, void *ptr, size_t size);
+// must be provided by the user: the key of the hash table of the strings
+// in a character class, e.g. /[\q{abc|def}]/v. A pattern can be written
+// to make its compilation slow unless the key is random and secret.
+void lre_hash_key(void *opaque, uint64_t key[2]);
 
 /* JS identifier test */
 extern uint32_t const lre_id_start_table_ascii[4];

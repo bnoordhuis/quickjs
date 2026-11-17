@@ -49997,6 +49997,12 @@ void *lre_realloc(void *opaque, void *ptr, size_t size)
     return js_realloc_rt(ctx->rt, ptr, size);
 }
 
+void lre_hash_key(void *opaque, uint64_t key[2])
+{
+    JSContext *ctx = opaque;
+    memcpy(key, ctx->rt->hash_key, sizeof(ctx->rt->hash_key));
+}
+
 static JSValue js_regexp_escape(JSContext *ctx, JSValueConst this_val,
                                 int argc, JSValueConst *argv)
 {
