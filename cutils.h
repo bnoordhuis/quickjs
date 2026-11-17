@@ -399,6 +399,89 @@ static inline uint64_t bswap64(uint64_t v)
 }
 #endif
 
+// SipHash-1-3, a keyed hash function for hash tables that hold untrusted
+// input: without the key, inputs that collide cannot be computed ahead of
+// time. See https://www.aumasson.jp/siphash/siphash.pdf
+typedef struct {
+    uint64_t v0, v1, v2, v3;
+} SipHash;
+
+static inline uint64_t siphash_rotl(uint64_t x, int n)
+{
+    return (x << n) | (x >> (64 - n));
+}
+
+static inline void siphash_round(SipHash *s)
+{
+    s->v0 += s->v1;
+    s->v1 = siphash_rotl(s->v1, 13);
+    s->v1 ^= s->v0;
+    s->v0 = siphash_rotl(s->v0, 32);
+    s->v2 += s->v3;
+    s->v3 = siphash_rotl(s->v3, 16);
+    s->v3 ^= s->v2;
+    s->v0 += s->v3;
+    s->v3 = siphash_rotl(s->v3, 21);
+    s->v3 ^= s->v0;
+    s->v2 += s->v1;
+    s->v1 = siphash_rotl(s->v1, 17);
+    s->v1 ^= s->v2;
+    s->v2 = siphash_rotl(s->v2, 32);
+}
+
+// A non-zero |tweak| is not part of SipHash. It keeps apart the hashes of
+// inputs of different kinds that are hashed with the same key.
+static inline void siphash_init(SipHash *s, const uint64_t key[2],
+                                uint64_t tweak)
+{
+    s->v0 = key[0] ^ 0x736F6D6570736575;
+    s->v1 = key[1] ^ 0x646F72616E646F6D ^ tweak;
+    s->v2 = key[0] ^ 0x6C7967656E657261;
+    s->v3 = key[1] ^ 0x7465646279746573;
+}
+
+// |m| is the next eight bytes of the input as a little-endian number
+static inline void siphash_update(SipHash *s, uint64_t m)
+{
+    s->v3 ^= m;
+    siphash_round(s);
+    s->v0 ^= m;
+}
+
+// |m| is the up to seven bytes that remain of the input as a little-endian
+// number, with the length of the input modulo 256 in bits 56 to 63
+static inline uint64_t siphash_fini(SipHash *s, uint64_t m)
+{
+    siphash_update(s, m);
+    s->v2 ^= 0xFF;
+    siphash_round(s);
+    siphash_round(s);
+    siphash_round(s);
+    return s->v0 ^ s->v1 ^ s->v2 ^ s->v3;
+}
+
+static inline uint64_t siphash(const uint64_t key[2], uint64_t tweak,
+                               const void *buf, size_t len)
+{
+    const uint8_t *p = buf;
+    SipHash s;
+    uint64_t m;
+    size_t i, n;
+
+    siphash_init(&s, key, tweak);
+    for (n = len; n >= 8; n -= 8) {
+        m = get_u64(p);
+        if (is_be())
+            m = bswap64(m);
+        siphash_update(&s, m);
+        p += 8;
+    }
+    m = (uint64_t)len << 56;
+    for (i = 0; i < n; i++)
+        m |= (uint64_t)p[i] << (8 * i);
+    return siphash_fini(&s, m);
+}
+
 static inline double fromfp16(uint16_t v) {
     double d, s;
     int e;
