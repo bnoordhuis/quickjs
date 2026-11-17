@@ -3343,15 +3343,83 @@ static uint32_t hash_string(JSRuntime *rt, JSString *str, uint32_t h)
     return h;
 }
 
+// true if a character of |val| does not fit in 8 bits
+static bool string_rope_is_wide(JSValueConst val)
+{
+    JSStringRope *r;
+    JSString *p;
+    uint32_t i;
+
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_STRING) {
+        p = JS_VALUE_GET_STRING(val);
+        if (p->is_wide_char) {
+            for (i = 0; i < p->len; i++) {
+                if (str16(p)[i] > 0xFF)
+                    return true;
+            }
+        }
+        return false;
+    }
+    r = JS_VALUE_GET_STRING_ROPE(val);
+    if (!r->is_wide_char)
+        return false;
+    return string_rope_is_wide(r->left) || string_rope_is_wide(r->right);
+}
+
+typedef struct {
+    SipHash s;
+    uint64_t m; // the bytes that are not hashed yet
+    size_t len; // in bytes
+    bool is_wide;
+} JSRopeHash;
+
+static inline void hash_rope_byte(JSRopeHash *t, uint8_t c)
+{
+    t->m |= (uint64_t)c << (8 * (t->len % 8));
+    t->len++;
+    if (t->len % 8 == 0) {
+        siphash_update(&t->s, t->m);
+        t->m = 0;
+    }
+}
+
+static void hash_rope_update(JSRopeHash *t, JSValueConst val)
+{
+    JSStringRope *r;
+    JSString *p;
+    uint16_t c;
+    uint32_t i;
+
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_STRING) {
+        p = JS_VALUE_GET_STRING(val);
+        for (i = 0; i < p->len; i++) {
+            c = p->is_wide_char ? str16(p)[i] : str8(p)[i];
+            if (t->is_wide) {
+                // as the bytes are in memory, like hash_string16() has them
+                hash_rope_byte(t, ((uint8_t *)&c)[0]);
+                hash_rope_byte(t, ((uint8_t *)&c)[1]);
+            } else {
+                hash_rope_byte(t, c);
+            }
+        }
+    } else {
+        r = JS_VALUE_GET_STRING_ROPE(val);
+        hash_rope_update(t, r->left);
+        hash_rope_update(t, r->right);
+    }
+}
+
+// same as hash_string() of the string that the rope stands for
 static uint32_t hash_string_rope(JSRuntime *rt, JSValueConst val, uint32_t h)
 {
-    if (JS_VALUE_GET_TAG(val) == JS_TAG_STRING) {
-        return hash_string(rt, JS_VALUE_GET_STRING(val), h);
-    } else {
-        JSStringRope *r = JS_VALUE_GET_STRING_ROPE(val);
-        h = hash_string_rope(rt, r->left, h);
-        return hash_string_rope(rt, r->right, h);
-    }
+    JSRopeHash t;
+
+    t.m = 0;
+    t.len = 0;
+    t.is_wide = string_rope_is_wide(val);
+    siphash_init(&t.s, rt->hash_key, h | (uint64_t)t.is_wide << 32);
+    hash_rope_update(&t, val);
+    return siphash_fini(&t.s, t.m | (uint64_t)t.len << 56);
 }
 
 static __maybe_unused void JS_DumpString(JSRuntime *rt, JSString *p)
@@ -53764,7 +53832,8 @@ static uint32_t map_hash_key(JSContext *ctx, JSValueConst key)
     case JS_TAG_STRING:
         return hash_string(rt, JS_VALUE_GET_STRING(key), tag);
     case JS_TAG_STRING_ROPE:
-        return hash_string_rope(rt, key, tag);
+        // a rope is the same key as the string that it stands for
+        return hash_string_rope(rt, key, JS_TAG_STRING);
     case JS_TAG_BIG_INT:
         r = JS_VALUE_GET_PTR(key);
         return hash_string8(rt, (void *)r->tab,
